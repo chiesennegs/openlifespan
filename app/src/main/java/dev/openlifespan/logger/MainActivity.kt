@@ -63,6 +63,8 @@ class MainActivity : Activity() {
                     } else {
                         @Suppress("DEPRECATION")
                         intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
+                            ?.filterIsInstance<ParcelUuid>()
+                            ?.toTypedArray()
                     }
                     appendDeviceUuids("sdp", device, uuids)
                 }
