@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -76,6 +77,29 @@ class MainActivity : Activity() {
                 0,
                 1f
             ))
+        }
+
+        if (Build.VERSION.SDK_INT >= 23) {
+            root.setOnApplyWindowInsetsListener { view, insets ->
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
+                    view.setPadding(
+                        24 + systemBars.left,
+                        24 + systemBars.top,
+                        24 + systemBars.right,
+                        24 + systemBars.bottom
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    view.setPadding(
+                        24 + insets.systemWindowInsetLeft,
+                        24 + insets.systemWindowInsetTop,
+                        24 + insets.systemWindowInsetRight,
+                        24 + insets.systemWindowInsetBottom
+                    )
+                }
+                insets
+            }
         }
 
         setContentView(root)
