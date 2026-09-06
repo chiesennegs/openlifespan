@@ -5,6 +5,7 @@ import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.BroadcastReceiver
@@ -26,13 +27,17 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 class MainActivity : Activity() {
+    private val lifespanDeviceName = "LifeSpan"
     private val logFileName = "openlifespan-log.txt"
+    private val serialPortProfileUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
     private lateinit var logView: TextView
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanning = false
     private var receiverRegistered = false
+    private var activeSocket: BluetoothSocket? = null
 
     private val classicReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -108,12 +113,24 @@ class MainActivity : Activity() {
             text = "Clear Log"
             setOnClickListener { clearLog() }
         }
+        val connectButton = Button(this).apply {
+            text = "Connect"
+            setOnClickListener { connectToLifespan() }
+        }
         logView = TextView(this).apply {
             textSize = 13f
             setTextIsSelectable(true)
         }
 
         val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(connectButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        val scanControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(startButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(stopButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -128,6 +145,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
             addView(controls)
+            addView(scanControls)
             addView(logScrollView, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
@@ -238,6 +256,7 @@ class MainActivity : Activity() {
             unregisterReceiver(classicReceiver)
             receiverRegistered = false
         }
+        activeSocket?.closeQuietly()
         super.onDestroy()
     }
 
@@ -320,10 +339,100 @@ class MainActivity : Activity() {
         appendLog("$prefix UUIDs name=$name address=${device.address} uuids=$values")
     }
 
+    private fun connectToLifespan() {
+        if (!hasConnectPermission()) {
+            appendLog("missing Bluetooth connect permission")
+            requestNeededPermissions()
+            return
+        }
+
+        val device = bluetoothAdapter?.bondedDevices.orEmpty()
+            .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
+        if (device == null) {
+            appendLog("no bonded $lifespanDeviceName device found")
+            return
+        }
+
+        Thread {
+            appendLog("connect probe started name=${device.name} address=${device.address}")
+            bluetoothAdapter?.cancelDiscovery()
+            activeSocket?.closeQuietly()
+
+            val attempts = listOf(
+                "secure SPP" to { device.createRfcommSocketToServiceRecord(serialPortProfileUuid) },
+                "insecure SPP" to { device.createInsecureRfcommSocketToServiceRecord(serialPortProfileUuid) }
+            )
+
+            for ((label, factory) in attempts) {
+                val socket = try {
+                    factory()
+                } catch (exception: IOException) {
+                    appendLog("$label socket creation failed: ${exception.message}")
+                    continue
+                }
+
+                try {
+                    appendLog("$label connecting")
+                    socket.connect()
+                    activeSocket = socket
+                    appendLog("$label connected; listening for 20 seconds")
+                    listenForBytes(socket, label)
+                    appendLog("$label listen complete")
+                    return@Thread
+                } catch (exception: IOException) {
+                    appendLog("$label failed: ${exception.message}")
+                    socket.closeQuietly()
+                }
+            }
+
+            appendLog("connect probe finished without a usable SPP connection")
+        }.start()
+    }
+
+    private fun listenForBytes(socket: BluetoothSocket, label: String) {
+        val input = try {
+            socket.inputStream
+        } catch (exception: IOException) {
+            appendLog("$label input stream failed: ${exception.message}")
+            return
+        }
+
+        val deadline = System.currentTimeMillis() + 20_000
+        val buffer = ByteArray(256)
+        var totalBytes = 0
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val available = input.available()
+                if (available > 0) {
+                    val count = input.read(buffer, 0, minOf(buffer.size, available))
+                    if (count > 0) {
+                        totalBytes += count
+                        appendLog("$label rx ${buffer.toHex(count)}")
+                    }
+                } else {
+                    Thread.sleep(100)
+                }
+            } catch (exception: IOException) {
+                appendLog("$label read failed: ${exception.message}")
+                break
+            } catch (exception: InterruptedException) {
+                Thread.currentThread().interrupt()
+                appendLog("$label interrupted")
+                break
+            }
+        }
+
+        appendLog("$label received totalBytes=$totalBytes")
+        socket.closeQuietly()
+    }
+
     private fun appendLog(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         val line = "[$timestamp] $message"
-        logView.append("$line\n")
+        runOnUiThread {
+            logView.append("$line\n")
+        }
         Log.d("OpenLifeSpanLogger", line)
         try {
             openFileOutput(logFileName, MODE_APPEND).use { output ->
@@ -338,5 +447,16 @@ class MainActivity : Activity() {
         logView.text = ""
         deleteFile(logFileName)
         appendLog("log cleared")
+    }
+
+    private fun BluetoothSocket.closeQuietly() {
+        try {
+            close()
+        } catch (_: IOException) {
+        }
+    }
+
+    private fun ByteArray.toHex(length: Int): String {
+        return take(length).joinToString(" ") { byte -> "%02X".format(byte) }
     }
 }

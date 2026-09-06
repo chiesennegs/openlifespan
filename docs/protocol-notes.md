@@ -10,14 +10,22 @@ Known public behavior:
 
 Unknowns to discover:
 
-- Bluetooth classic vs BLE. The first Android prototype assumes BLE, but this may need to change.
-- Advertised device name.
+- Bluetooth classic vs BLE. Initial testing found the treadmill through Android system pairing, not app BLE scan.
+- Advertised device name: `LifeSpan` after system pairing.
+- Paired Bluetooth address observed in one local test: `00:0C:BF:29:F3:E6`.
 - Service UUIDs.
 - Characteristic UUIDs.
 - Which characteristics support read, write, notify, or indicate.
 - Whether pressing the console Bluetooth button changes advertisement or connection behavior.
 - Packet framing and checksum, if any.
 - Units and scaling for time, distance, calories, steps, and speed.
+
+Observed so far:
+
+- Android reports the paired `LifeSpan` device as Bluetooth type `2`, which is Classic-only.
+- Cached and SDP UUIDs for the paired device were empty in the first capture.
+- Next probe should attempt a read-only RFCOMM connection using the standard Serial Port Profile UUID:
+  `00001101-0000-1000-8000-00805f9b34fb`.
 
 Capture checklist:
 
