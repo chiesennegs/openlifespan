@@ -14,6 +14,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelUuid
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
@@ -50,6 +51,21 @@ class MainActivity : Activity() {
 
                 BluetoothAdapter.ACTION_DISCOVERY_STARTED -> appendLog("classic discovery started")
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> appendLog("classic discovery finished")
+                BluetoothDevice.ACTION_UUID -> {
+                    val device = if (Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    val uuids = if (Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID, ParcelUuid::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
+                    }
+                    appendDeviceUuids("sdp", device, uuids)
+                }
             }
         }
     }
@@ -76,7 +92,7 @@ class MainActivity : Activity() {
         bluetoothAdapter = getSystemService(BluetoothManager::class.java)?.adapter
 
         val startButton = Button(this).apply {
-            text = "Start Scan"
+            text = "Scan / Probe"
             setOnClickListener { startScan() }
         }
         val stopButton = Button(this).apply {
@@ -137,6 +153,7 @@ class MainActivity : Activity() {
         appendLog("OpenLifeSpan Bluetooth logger ready")
         appendBluetoothState()
         appendBondedDevices()
+        probeBondedDevices()
     }
 
     private fun requestNeededPermissions() {
@@ -157,6 +174,7 @@ class MainActivity : Activity() {
     private fun startScan() {
         appendBluetoothState()
         appendBondedDevices()
+        probeBondedDevices()
 
         if (!hasScanPermission()) {
             appendLog("missing Bluetooth scan permission")
@@ -233,6 +251,7 @@ class MainActivity : Activity() {
             addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothDevice.ACTION_UUID)
         }
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(classicReceiver, filter, RECEIVER_EXPORTED)
@@ -264,9 +283,31 @@ class MainActivity : Activity() {
             appendLog("no bonded Classic Bluetooth devices")
         } else {
             bondedDevices.forEach { device ->
-                appendLog("bonded name=${device.name ?: "(unnamed)"} address=${device.address} type=${device.type}")
+                appendLog("bonded name=${device.name ?: "(unnamed)"} address=${device.address} type=${device.type} bondState=${device.bondState}")
+                appendDeviceUuids("cached", device, device.uuids)
             }
         }
+    }
+
+    private fun probeBondedDevices() {
+        if (!hasConnectPermission()) return
+
+        registerClassicReceiver()
+        bluetoothAdapter?.bondedDevices.orEmpty().forEach { device ->
+            val started = device.fetchUuidsWithSdp()
+            appendLog("sdp requested name=${device.name ?: "(unnamed)"} address=${device.address} started=$started")
+        }
+    }
+
+    private fun appendDeviceUuids(prefix: String, device: BluetoothDevice?, uuids: Array<out ParcelUuid>?) {
+        if (device == null) {
+            appendLog("$prefix UUID result without device")
+            return
+        }
+
+        val name = if (hasConnectPermission()) device.name ?: "(unnamed)" else "(name unavailable)"
+        val values = uuids?.joinToString { it.uuid.toString() } ?: "(none)"
+        appendLog("$prefix UUIDs name=$name address=${device.address} uuids=$values")
     }
 
     private fun appendLog(message: String) {
