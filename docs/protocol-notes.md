@@ -24,8 +24,9 @@ Observed so far:
 
 - Android reports the paired `LifeSpan` device as Bluetooth type `2`, which is Classic-only.
 - Cached and SDP UUIDs for the paired device were empty in the first capture.
-- Next probe should attempt a read-only RFCOMM connection using the standard Serial Port Profile UUID:
+- A read-only RFCOMM connection using the standard Serial Port Profile UUID failed with "socket might be closed or timeout, ret -1":
   `00001101-0000-1000-8000-00805f9b34fb`.
+- Next probe should try direct RFCOMM channels because some Classic modules do not expose usable SDP records.
 
 Capture checklist:
 

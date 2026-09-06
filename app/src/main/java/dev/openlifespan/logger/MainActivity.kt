@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private val lifespanDeviceName = "LifeSpan"
     private val logFileName = "openlifespan-log.txt"
     private val serialPortProfileUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
+    private val rfcommProbeChannels = (1..30).toList()
     private lateinit var logView: TextView
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanning = false
@@ -385,8 +386,39 @@ class MainActivity : Activity() {
                 }
             }
 
+            appendLog("SPP UUID attempts failed; probing RFCOMM channels")
+            for (channel in rfcommProbeChannels) {
+                val socket = try {
+                    device.createRfcommSocketOnChannel(channel)
+                } catch (exception: ReflectiveOperationException) {
+                    appendLog("channel $channel socket creation failed: ${exception.message}")
+                    break
+                } catch (exception: ClassCastException) {
+                    appendLog("channel $channel socket creation returned unexpected type: ${exception.message}")
+                    break
+                }
+
+                try {
+                    appendLog("channel $channel connecting")
+                    socket.connect()
+                    activeSocket = socket
+                    appendLog("channel $channel connected; listening for 20 seconds")
+                    listenForBytes(socket, "channel $channel")
+                    appendLog("channel $channel listen complete")
+                    return@Thread
+                } catch (exception: IOException) {
+                    appendLog("channel $channel failed: ${exception.message}")
+                    socket.closeQuietly()
+                }
+            }
+
             appendLog("connect probe finished without a usable SPP connection")
         }.start()
+    }
+
+    private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
+        val method = javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+        return method.invoke(this, channel) as BluetoothSocket
     }
 
     private fun listenForBytes(socket: BluetoothSocket, label: String) {
