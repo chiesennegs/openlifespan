@@ -15,17 +15,20 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
+import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
+    private val logFileName = "openlifespan-log.txt"
     private lateinit var logView: TextView
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanning = false
@@ -101,6 +104,10 @@ class MainActivity : Activity() {
             text = "Stop Scan"
             setOnClickListener { stopScan() }
         }
+        val clearButton = Button(this).apply {
+            text = "Clear Log"
+            setOnClickListener { clearLog() }
+        }
         logView = TextView(this).apply {
             textSize = 13f
             setTextIsSelectable(true)
@@ -110,6 +117,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             addView(startButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(stopButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(clearButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
 
         val logScrollView = ScrollView(this).apply {
@@ -314,6 +322,21 @@ class MainActivity : Activity() {
 
     private fun appendLog(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-        logView.append("[$timestamp] $message\n")
+        val line = "[$timestamp] $message"
+        logView.append("$line\n")
+        Log.d("OpenLifeSpanLogger", line)
+        try {
+            openFileOutput(logFileName, MODE_APPEND).use { output ->
+                output.write("$line\n".toByteArray(Charsets.UTF_8))
+            }
+        } catch (exception: IOException) {
+            Log.e("OpenLifeSpanLogger", "Failed to write app log", exception)
+        }
+    }
+
+    private fun clearLog() {
+        logView.text = ""
+        deleteFile(logFileName)
+        appendLog("log cleared")
     }
 }
