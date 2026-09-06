@@ -63,11 +63,19 @@ class MainActivity : Activity() {
             addView(stopButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
 
+        val logScrollView = ScrollView(this).apply {
+            addView(logView)
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
             addView(controls)
-            addView(ScrollView(context).apply { addView(logView) }, LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(logScrollView, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            ))
         }
 
         setContentView(root)
