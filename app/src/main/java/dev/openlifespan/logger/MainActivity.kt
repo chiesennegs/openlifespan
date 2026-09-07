@@ -30,6 +30,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import java.io.IOException
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -49,7 +50,11 @@ class MainActivity : Activity() {
     private var receiverRegistered = false
     private var activeGatt: BluetoothGatt? = null
     private var activeWriteCharacteristic: BluetoothGattCharacteristic? = null
+    private val pendingCommands = ArrayDeque<PendingCommand>()
+    private var writeInFlight = false
     private var activeSocket: BluetoothSocket? = null
+
+    private data class PendingCommand(val label: String, val bytes: ByteArray)
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
@@ -62,6 +67,9 @@ class MainActivity : Activity() {
                 appendLog("gatt disconnected")
                 gatt.close()
                 if (activeGatt == gatt) activeGatt = null
+                activeWriteCharacteristic = null
+                pendingCommands.clear()
+                writeInFlight = false
             }
         }
 
@@ -118,6 +126,10 @@ class MainActivity : Activity() {
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             appendLog("gatt notify ${characteristic.uuid} value=${characteristic.value?.toHex().orEmpty()}")
+            if (characteristic.uuid == lifespanNotifyUuid) {
+                writeInFlight = false
+                sendNextPendingCommand()
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -126,6 +138,10 @@ class MainActivity : Activity() {
             status: Int
         ) {
             appendLog("gatt write ${characteristic.uuid} status=$status")
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                writeInFlight = false
+                sendNextPendingCommand()
+            }
         }
 
         override fun onDescriptorWrite(
@@ -384,6 +400,8 @@ class MainActivity : Activity() {
         activeSocket?.closeQuietly()
         activeGatt?.close()
         activeWriteCharacteristic = null
+        pendingCommands.clear()
+        writeInFlight = false
         super.onDestroy()
     }
 
@@ -558,6 +576,8 @@ class MainActivity : Activity() {
         bluetoothAdapter?.cancelDiscovery()
         activeGatt?.close()
         activeWriteCharacteristic = null
+        pendingCommands.clear()
+        writeInFlight = false
         appendLog("gatt connect probe started name=${device.name} address=${device.address} type=${device.type}")
         activeGatt = if (Build.VERSION.SDK_INT >= 23) {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -587,15 +607,39 @@ class MainActivity : Activity() {
             return
         }
 
+        pendingCommands.add(PendingCommand(label, command))
+        appendLog("queued command $label tx=${command.toHex()} queueSize=${pendingCommands.size}")
+        sendNextPendingCommand()
+    }
+
+    private fun sendNextPendingCommand() {
+        if (writeInFlight || pendingCommands.isEmpty()) return
+
+        val gatt = activeGatt
+        val characteristic = activeWriteCharacteristic
+        if (gatt == null || characteristic == null) {
+            appendLog("cannot send queued command; GATT is not ready")
+            return
+        }
+
+        val command = pendingCommands.peek() ?: return
         val started = if (Build.VERSION.SDK_INT >= 33) {
-            gatt.writeCharacteristic(characteristic, command, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            gatt.writeCharacteristic(characteristic, command.bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
         } else {
             @Suppress("DEPRECATION")
-            characteristic.value = command
+            characteristic.value = command.bytes
             @Suppress("DEPRECATION")
             gatt.writeCharacteristic(characteristic)
         }
-        appendLog("command $label tx=${command.toHex()} started=$started")
+        appendLog("command ${command.label} tx=${command.bytes.toHex()} started=$started")
+
+        if (started) {
+            writeInFlight = true
+            pendingCommands.remove()
+        } else {
+            pendingCommands.remove()
+            appendLog("dropped command ${command.label}; GATT write did not start")
+        }
     }
 
     private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {

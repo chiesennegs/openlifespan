@@ -30,18 +30,23 @@ Observed so far:
   `00001101-0000-1000-8000-00805f9b34fb`.
 - Direct RFCOMM channel probing also failed.
 - Legacy bytecode uses BLE GATT through Android `connectGatt`, with the LifeSpan service/characteristic UUIDs listed above.
-- Next probe should connect to the paired device via BLE GATT, discover services, and subscribe to the notify characteristic.
+- The console Bluetooth button appears to open a short BLE connection window. A GATT connection requested before pressing the button did not complete until the button was pressed.
+- The physical TR-1200 DT3 exposes the expected LifeSpan service and characteristics. `fff1` supports write without response, write, and notify; `fff2` supports write without response and write.
+- Android disconnects with status `8` after a short idle period following a command response.
+- Android API 33+ returns busy when two GATT writes are attempted back-to-back, so OpenLifeSpan queues commands and waits for `onCharacteristicWrite` before sending the next one.
 
 BLE command clues from legacy bytecode:
 
 - Commands are 5 bytes written to the `fff2` characteristic.
 - Notification/response data arrives through the `fff1` characteristic.
 - `AA 00 00 00 00` asks for the stored record count.
+- `AA FF 00 00 00 00` was observed as the physical treadmill response after querying record count with no captured activity data available or no active sync state.
 - `AB 00 00 00 00` begins stored-record retrieval.
 - `AB 00 RR RR 00` asks for a single stored record by 1-based record number, where `RR RR` is the big-endian record number.
 - `AC 00 00 00 00` asks for multi-user status.
 - `A1 8D 00 00 00` asks for console date.
 - `A1 8E 00 00 00` asks for console time.
+- `A1 FF 00 00 00 00` was observed as the physical treadmill response to a date query with the console in its current state.
 - `AB 01 00 00 00` clears stored console data in the legacy sync flow. Avoid sending this in OpenLifeSpan unless the user explicitly enables a clear-after-import option.
 - `AB 02 00 00 00` and `AB 02 01 00 00` appear to exit the legacy sync mode back to idle/pause.
 
