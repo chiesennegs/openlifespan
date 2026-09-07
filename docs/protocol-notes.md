@@ -33,6 +33,7 @@ Observed so far:
 - The console Bluetooth button appears to open a short BLE connection window. A GATT connection requested before pressing the button did not complete until the button was pressed.
 - The physical TR-1200 DT3 exposes the expected LifeSpan service and characteristics. `fff1` supports write without response, write, and notify; `fff2` supports write without response and write.
 - Android disconnects with status `8` after a short idle period following a command response.
+- Another connection-window press was needed between date/time probing and later activity-data probing, so treat each console BT press as one short-lived sync window.
 - Android API 33+ returns busy when two GATT writes are attempted back-to-back, so OpenLifeSpan queues commands and waits for `onCharacteristicWrite` before sending the next one.
 
 BLE command clues from legacy bytecode:
@@ -43,6 +44,7 @@ BLE command clues from legacy bytecode:
 - `AA FF 00 00 00 00` was observed as the physical treadmill response after querying record count with no captured activity data available or no active sync state.
 - `AB 00 00 00 00` begins stored-record retrieval.
 - `AB 00 RR RR 00` asks for a single stored record by 1-based record number, where `RR RR` is the big-endian record number.
+- `AB 00 00 01 00` asks for stored record 1.
 - `AC 00 00 00 00` asks for multi-user status.
 - `A1 8D 00 00 00` asks for console date.
 - `A1 8E 00 00 00` asks for console time.

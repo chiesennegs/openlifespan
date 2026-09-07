@@ -235,6 +235,17 @@ class MainActivity : Activity() {
             text = "Query Record Count"
             setOnClickListener { sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00)) }
         }
+        val syncHandshakeButton = Button(this).apply {
+            text = "Sync Handshake"
+            setOnClickListener {
+                sendLifespanCommand("multi-user", byteArrayOf(0xAC.toByte(), 0x00, 0x00, 0x00, 0x00))
+                sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00))
+            }
+        }
+        val firstRecordButton = Button(this).apply {
+            text = "Query First Record"
+            setOnClickListener { sendLifespanCommand("record 1", byteArrayOf(0xAB.toByte(), 0x00, 0x00, 0x01, 0x00)) }
+        }
         val dateTimeButton = Button(this).apply {
             text = "Query Date/Time"
             setOnClickListener {
@@ -258,6 +269,14 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(recordCountButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(syncHandshakeButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(firstRecordButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
