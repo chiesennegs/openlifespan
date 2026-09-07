@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private var bleScanning = false
     private var receiverRegistered = false
     private var activeGatt: BluetoothGatt? = null
+    private var activeWriteCharacteristic: BluetoothGattCharacteristic? = null
     private var activeSocket: BluetoothSocket? = null
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -103,6 +104,7 @@ class MainActivity : Activity() {
             appendLog("LifeSpan notify readStarted=$readStarted")
 
             val writeCharacteristic = service.getCharacteristic(lifespanWriteUuid)
+            activeWriteCharacteristic = writeCharacteristic
             appendLog("LifeSpan write characteristic present=${writeCharacteristic != null}")
         }
 
@@ -116,6 +118,14 @@ class MainActivity : Activity() {
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             appendLog("gatt notify ${characteristic.uuid} value=${characteristic.value?.toHex().orEmpty()}")
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            appendLog("gatt write ${characteristic.uuid} status=$status")
         }
 
         override fun onDescriptorWrite(
@@ -205,6 +215,17 @@ class MainActivity : Activity() {
             text = "GATT Connect"
             setOnClickListener { connectGattToLifespan() }
         }
+        val recordCountButton = Button(this).apply {
+            text = "Query Record Count"
+            setOnClickListener { sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00)) }
+        }
+        val dateTimeButton = Button(this).apply {
+            text = "Query Date/Time"
+            setOnClickListener {
+                sendLifespanCommand("date", byteArrayOf(0xA1.toByte(), 0x8D.toByte(), 0x00, 0x00, 0x00))
+                sendLifespanCommand("time", byteArrayOf(0xA1.toByte(), 0x8E.toByte(), 0x00, 0x00, 0x00))
+            }
+        }
         val sppButton = Button(this).apply {
             text = "SPP Probe"
             setOnClickListener { connectToLifespan() }
@@ -217,6 +238,14 @@ class MainActivity : Activity() {
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(connectButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(recordCountButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(dateTimeButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -354,6 +383,7 @@ class MainActivity : Activity() {
         }
         activeSocket?.closeQuietly()
         activeGatt?.close()
+        activeWriteCharacteristic = null
         super.onDestroy()
     }
 
@@ -527,6 +557,7 @@ class MainActivity : Activity() {
 
         bluetoothAdapter?.cancelDiscovery()
         activeGatt?.close()
+        activeWriteCharacteristic = null
         appendLog("gatt connect probe started name=${device.name} address=${device.address} type=${device.type}")
         activeGatt = if (Build.VERSION.SDK_INT >= 23) {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -540,6 +571,31 @@ class MainActivity : Activity() {
         if (!hasConnectPermission()) return null
         return bluetoothAdapter?.bondedDevices.orEmpty()
             .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
+    }
+
+    private fun sendLifespanCommand(label: String, command: ByteArray) {
+        if (!hasConnectPermission()) {
+            appendLog("missing Bluetooth connect permission")
+            requestNeededPermissions()
+            return
+        }
+
+        val gatt = activeGatt
+        val characteristic = activeWriteCharacteristic
+        if (gatt == null || characteristic == null) {
+            appendLog("cannot send $label; connect GATT first and wait for service discovery")
+            return
+        }
+
+        val started = if (Build.VERSION.SDK_INT >= 33) {
+            gatt.writeCharacteristic(characteristic, command, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = command
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+        appendLog("command $label tx=${command.toHex()} started=$started")
     }
 
     private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
