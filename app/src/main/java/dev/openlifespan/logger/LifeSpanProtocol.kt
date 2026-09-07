@@ -28,6 +28,18 @@ object LifeSpanProtocol {
         return byteArrayOf(0xAB.toByte(), 0x01, 0x00, 0x00, 0x00)
     }
 
+    fun engageExternalControl(): ByteArray {
+        return byteArrayOf(0x04, 0x00, 0x00, 0x00, 0x00)
+    }
+
+    fun resetCounters(): ByteArray {
+        return byteArrayOf(0xE2.toByte(), 0x00, 0x00, 0x00, 0x00)
+    }
+
+    fun escapeToIdle(): ByteArray {
+        return byteArrayOf(0xAB.toByte(), 0x02, 0x00, 0x00, 0x00)
+    }
+
     fun setSpeed(speedHundredths: Int): ByteArray {
         val whole = (speedHundredths / 100).coerceIn(0, 12)
         val fractional = (speedHundredths % 100).coerceIn(0, 99)

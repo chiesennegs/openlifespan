@@ -219,9 +219,9 @@ class MainActivity : Activity() {
         val clearButton = commandButton("Clear Console Data") {
             confirmCommand(
                 title = "Clear console data?",
-                message = "This sends AB 01 00 00 00 to clear stored activity data from the console."
+                message = "This resets the console counters after confirmation. Use only while supervising the treadmill."
             ) {
-                enqueueCommand("clear console data", LifeSpanProtocol.clearStoredData())
+                clearConsoleCounters(restoreSpeedHundredths = null)
             }
         }
         val resetButton = commandButton("Reset BLE Session") { resetBleSession() }
@@ -443,9 +443,36 @@ class MainActivity : Activity() {
         appendLog("session saved id=${session.id}")
         refreshHistory()
 
-        if (clearConsole) enqueueCommand("clear console data", LifeSpanProtocol.clearStoredData())
+        if (clearConsole) {
+            clearConsoleCounters(restoreSpeedHundredths)
+        } else if (restoreSpeedHundredths != null) {
+            enqueueCommand("restore speed", LifeSpanProtocol.setSpeed(restoreSpeedHundredths))
+        }
+    }
+
+    private fun clearConsoleCounters(restoreSpeedHundredths: Int?) {
+        updateStatus("Clearing console counters")
+        enqueueCommand("engage external control", LifeSpanProtocol.engageExternalControl()) { value ->
+            appendLog("engage external control status=${value?.toHex().orEmpty()}")
+        }
+        enqueueCommand("reset console counters", LifeSpanProtocol.resetCounters()) { value ->
+            appendLog("reset counters status=${value?.toHex().orEmpty()}")
+        }
+        enqueueCommand("verify distance", LifeSpanProtocol.requestProperty(LifeSpanProtocol.PROPERTY_DISTANCE)) { value ->
+            appendLog("post-clear distance=${value?.toHex().orEmpty()}")
+        }
+        enqueueCommand("verify elapsed time", LifeSpanProtocol.requestProperty(LifeSpanProtocol.PROPERTY_ELAPSED_TIME)) { value ->
+            appendLog("post-clear elapsed time=${value?.toHex().orEmpty()}")
+        }
+        enqueueCommand("verify steps", LifeSpanProtocol.requestProperty(LifeSpanProtocol.PROPERTY_STEPS)) { value ->
+            appendLog("post-clear steps=${value?.toHex().orEmpty()}")
+        }
         if (restoreSpeedHundredths != null) {
             enqueueCommand("restore speed", LifeSpanProtocol.setSpeed(restoreSpeedHundredths))
+        }
+        enqueueCommand("escape to idle", LifeSpanProtocol.escapeToIdle()) { value ->
+            appendLog("escape to idle status=${value?.toHex().orEmpty()}")
+            updateStatus("Console clear sent")
         }
     }
 
