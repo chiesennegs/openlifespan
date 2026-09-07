@@ -290,9 +290,9 @@ class MainActivity : Activity() {
             setOnClickListener {
                 confirmCommand(
                     title = "Set speed to 2.5?",
-                    message = "This sends the experimental speed command D0 02 50 00 00. Use only while supervising the treadmill."
+                    message = "This sends the experimental speed command D0 02 32 00 00. Use only while supervising the treadmill."
                 ) {
-                    sendLifespanCommand("set speed 2.5 test", byteArrayOf(0xD0.toByte(), 0x02, 0x50, 0x00, 0x00))
+                    sendLifespanCommand("set speed 2.5 test", byteArrayOf(0xD0.toByte(), 0x02, 0x32, 0x00, 0x00))
                     sendLifespanCommand("speed property 82", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
                 }
             }
