@@ -35,7 +35,12 @@ class SettingsActivity : Activity() {
         when (section) { "Data" -> addData(root); "History" -> addHistory(root); "System" -> addSystem(root); "Help" -> addHelp(root); else -> addSettings(root) }
         if (section == "Settings" || section == "System") {
             root.addView(android.widget.Space(this), LinearLayout.LayoutParams(1, 0, 1f))
-            root.addView(ImageView(this).apply { setImageResource(R.drawable.openlifespan_mascot); scaleType = ImageView.ScaleType.CENTER_INSIDE }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)).apply { topMargin = dp(16) })
+            root.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER
+                addView(ImageView(this@SettingsActivity).apply { setImageResource(R.drawable.openlifespan_mascot); scaleType = ImageView.ScaleType.CENTER_INSIDE }, LinearLayout.LayoutParams(0, dp(104), 1f).apply { marginEnd = dp(8) })
+                addView(ImageView(this@SettingsActivity).apply { setImageResource(R.drawable.mooseai_logo); scaleType = ImageView.ScaleType.CENTER_INSIDE }, LinearLayout.LayoutParams(0, dp(104), 1f).apply { marginStart = dp(8) })
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(104)).apply { topMargin = dp(8); bottomMargin = dp(18) })
         }
         setContentView(root)
     }
