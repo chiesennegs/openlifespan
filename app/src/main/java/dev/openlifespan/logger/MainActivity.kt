@@ -20,7 +20,9 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.ParcelUuid
+import android.os.Looper
 import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -51,7 +53,9 @@ class MainActivity : Activity() {
     private var activeGatt: BluetoothGatt? = null
     private var activeWriteCharacteristic: BluetoothGattCharacteristic? = null
     private val pendingCommands = ArrayDeque<PendingCommand>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var writeInFlight = false
+    private var inFlightCommand: PendingCommand? = null
     private var activeSocket: BluetoothSocket? = null
 
     private data class PendingCommand(val label: String, val bytes: ByteArray)
@@ -70,6 +74,7 @@ class MainActivity : Activity() {
                 activeWriteCharacteristic = null
                 pendingCommands.clear()
                 writeInFlight = false
+                inFlightCommand = null
             }
         }
 
@@ -132,6 +137,7 @@ class MainActivity : Activity() {
             }
             if (characteristic.uuid == lifespanNotifyUuid) {
                 writeInFlight = false
+                inFlightCommand = null
                 sendNextPendingCommand()
             }
         }
@@ -144,6 +150,7 @@ class MainActivity : Activity() {
             appendLog("gatt write ${characteristic.uuid} status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 writeInFlight = false
+                inFlightCommand = null
                 sendNextPendingCommand()
             }
         }
@@ -262,6 +269,10 @@ class MainActivity : Activity() {
                 sendLifespanCommand("time", byteArrayOf(0xA1.toByte(), 0x8E.toByte(), 0x00, 0x00, 0x00))
             }
         }
+        val liveSnapshotButton = Button(this).apply {
+            text = "Live Snapshot"
+            setOnClickListener { sendLiveSnapshotCommands() }
+        }
         val sppButton = Button(this).apply {
             text = "SPP Probe"
             setOnClickListener { connectToLifespan() }
@@ -294,6 +305,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(dateTimeButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(liveSnapshotButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -434,6 +449,7 @@ class MainActivity : Activity() {
         activeWriteCharacteristic = null
         pendingCommands.clear()
         writeInFlight = false
+        inFlightCommand = null
         super.onDestroy()
     }
 
@@ -610,6 +626,7 @@ class MainActivity : Activity() {
         activeWriteCharacteristic = null
         pendingCommands.clear()
         writeInFlight = false
+        inFlightCommand = null
         appendLog("gatt connect probe started name=${device.name} address=${device.address} type=${device.type}")
         activeGatt = if (Build.VERSION.SDK_INT >= 23) {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -644,6 +661,31 @@ class MainActivity : Activity() {
         sendNextPendingCommand()
     }
 
+    private fun sendLiveSnapshotCommands() {
+        val propertyQueries = listOf(
+            0x81 to "units",
+            0x82 to "speed",
+            0x83 to "incline",
+            0x84 to "resistance",
+            0x85 to "distance",
+            0x87 to "calories",
+            0x88 to "steps",
+            0x89 to "elapsed time",
+            0x8A to "pace-or-rpm",
+            0x91 to "device state",
+            0x94 to "workout status",
+            0x71 to "max speed",
+            0x73 to "max resistance"
+        )
+
+        propertyQueries.forEach { (property, label) ->
+            sendLifespanCommand(
+                "$label property ${property.toHexByte()}",
+                byteArrayOf(0xA1.toByte(), property.toByte(), 0x00, 0x00, 0x00)
+            )
+        }
+    }
+
     private fun sendNextPendingCommand() {
         if (writeInFlight || pendingCommands.isEmpty()) return
 
@@ -667,7 +709,16 @@ class MainActivity : Activity() {
 
         if (started) {
             writeInFlight = true
+            inFlightCommand = command
             pendingCommands.remove()
+            mainHandler.postDelayed({
+                if (writeInFlight && inFlightCommand === command) {
+                    appendLog("command ${command.label} timed out waiting for notify; continuing")
+                    writeInFlight = false
+                    inFlightCommand = null
+                    sendNextPendingCommand()
+                }
+            }, 1_500)
         } else {
             pendingCommands.remove()
             appendLog("dropped command ${command.label}; GATT write did not start")
@@ -709,13 +760,52 @@ class MainActivity : Activity() {
     }
 
     private fun appendStatusResponse(label: String, value: ByteArray) {
+        val activeLabel = inFlightCommand?.label
+        val responseLabel = if (label == "property" && activeLabel != null) "$label for $activeLabel" else label
         val status = value.getOrNull(1)?.toUnsignedInt()
         when (status) {
-            0xAA -> appendLog("decoded $label status=AA payload=${value.drop(2).toByteArray().toHex()}")
-            0xFF -> appendLog("decoded $label status=FF")
-            null -> appendLog("decoded $label response too short")
-            else -> appendLog("decoded $label status=${value[1].toHexByte()} payload=${value.drop(2).toByteArray().toHex()}")
+            0xAA -> appendLog("decoded $responseLabel status=AA payload=${value.drop(2).toByteArray().toHex()} ${decodePropertyPayload(activeLabel, value)}")
+            0xFF -> appendLog("decoded $responseLabel status=FF")
+            null -> appendLog("decoded $responseLabel response too short")
+            else -> appendLog("decoded $responseLabel status=${value[1].toHexByte()} payload=${value.drop(2).toByteArray().toHex()} ${decodePropertyPayload(activeLabel, value)}")
         }
+    }
+
+    private fun decodePropertyPayload(commandLabel: String?, value: ByteArray): String {
+        if (commandLabel == null || value.size < 6 || value[0].toUnsignedInt() != 0xA1) return ""
+
+        val payload = value.drop(2).toByteArray()
+        val first = payload[0].toUnsignedInt()
+        val second = payload[1].toUnsignedInt()
+        val third = payload[2].toUnsignedInt()
+        val twoByteValue = (first shl 8) or second
+        val decimalValue = (first * 100 + second) / 100.0
+        val hmsSeconds = first * 3600 + second * 60 + third
+
+        return when {
+            commandLabel.startsWith("speed ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
+            commandLabel.startsWith("max speed ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
+            commandLabel.startsWith("distance ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
+            commandLabel.startsWith("incline ") -> "decodedValue=${decodeIncline(first)}"
+            commandLabel.startsWith("elapsed time ") -> "decodedValue=${formatSeconds(hmsSeconds)}"
+            commandLabel.startsWith("pace-or-rpm ") -> "decodedInt=$twoByteValue decodedTime=${formatSeconds(hmsSeconds)}"
+            commandLabel.startsWith("units ") -> "decodedByte=$first"
+            commandLabel.startsWith("device state ") -> "decodedByte=$first"
+            commandLabel.startsWith("workout status ") -> "decodedByte=$first"
+            else -> "decodedInt=$twoByteValue"
+        }
+    }
+
+    private fun decodeIncline(value: Int): Int {
+        val magnitude = value and 0x7F
+        return if (magnitude <= 50) value else 50 - value
+    }
+
+    private fun formatSeconds(seconds: Int): String {
+        val hours = seconds / 3600
+        val minutes = (seconds % 3600) / 60
+        val remainingSeconds = seconds % 60
+        return "%02d:%02d:%02d".format(Locale.US, hours, minutes, remainingSeconds)
     }
 
     private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
@@ -797,6 +887,8 @@ class MainActivity : Activity() {
     private fun Byte.toHexByte(): String = "%02X".format(toUnsignedInt())
 
     private fun Byte.toUnsignedInt(): Int = toInt() and 0xFF
+
+    private fun Int.toHexByte(): String = "%02X".format(this and 0xFF)
 
     private fun Int.toBluetoothStateName(): String {
         return when (this) {
