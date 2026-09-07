@@ -125,7 +125,11 @@ class MainActivity : Activity() {
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            appendLog("gatt notify ${characteristic.uuid} value=${characteristic.value?.toHex().orEmpty()}")
+            val value = characteristic.value
+            appendLog("gatt notify ${characteristic.uuid} value=${value?.toHex().orEmpty()}")
+            if (value != null) {
+                appendDecodedLifespanResponse(value)
+            }
             if (characteristic.uuid == lifespanNotifyUuid) {
                 writeInFlight = false
                 sendNextPendingCommand()
@@ -661,6 +665,50 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun appendDecodedLifespanResponse(value: ByteArray) {
+        if (value.size < 2) return
+
+        when (value[0].toUnsignedInt()) {
+            0xAA -> appendRecordCountResponse(value)
+            0xAB -> appendRecordDataResponse(value)
+            0xAC -> appendStatusResponse("multi-user", value)
+            0xA1 -> appendStatusResponse("property", value)
+        }
+    }
+
+    private fun appendRecordCountResponse(value: ByteArray) {
+        when (value.getOrNull(1)?.toUnsignedInt()) {
+            0xAA -> {
+                if (value.size >= 4) {
+                    val count = (value[2].toUnsignedInt() shl 8) or value[3].toUnsignedInt()
+                    appendLog("decoded record count=$count")
+                } else {
+                    appendLog("decoded record count response too short")
+                }
+            }
+            0xFF -> appendLog("decoded record count status=FF (not a valid count)")
+            else -> appendLog("decoded record count unexpected status=${value[1].toHexByte()}")
+        }
+    }
+
+    private fun appendRecordDataResponse(value: ByteArray) {
+        if (value.getOrNull(1)?.toUnsignedInt() == 0xAA) {
+            appendLog("decoded record data frame marker")
+        } else {
+            appendLog("decoded record data status=${value.getOrNull(1)?.toHexByte() ?: "missing"}")
+        }
+    }
+
+    private fun appendStatusResponse(label: String, value: ByteArray) {
+        val status = value.getOrNull(1)?.toUnsignedInt()
+        when (status) {
+            0xAA -> appendLog("decoded $label status=AA payload=${value.drop(2).toByteArray().toHex()}")
+            0xFF -> appendLog("decoded $label status=FF")
+            null -> appendLog("decoded $label response too short")
+            else -> appendLog("decoded $label status=${value[1].toHexByte()} payload=${value.drop(2).toByteArray().toHex()}")
+        }
+    }
+
     private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
         val method = javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
         return method.invoke(this, channel) as BluetoothSocket
@@ -736,6 +784,10 @@ class MainActivity : Activity() {
     private fun ByteArray.toHex(length: Int = size): String {
         return take(length).joinToString(" ") { byte -> "%02X".format(byte) }
     }
+
+    private fun Byte.toHexByte(): String = "%02X".format(toUnsignedInt())
+
+    private fun Byte.toUnsignedInt(): Int = toInt() and 0xFF
 
     private fun Int.toBluetoothStateName(): String {
         return when (this) {
