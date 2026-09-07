@@ -16,6 +16,15 @@ Created by [MooseAI, LLC](https://mooseaillc.com) · Support: [support@mooseaill
 
 The initial hardware target is the LifeSpan TR-1200 DT3 console. Other compatible LifeSpan consoles may work, but have not yet been verified.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-week.png" alt="OpenLifeSpan weekly calories dashboard" width="320" />
+  <img src="docs/screenshots/system.png" alt="OpenLifeSpan System and diagnostics screen" width="320" />
+</p>
+
+The dashboard offers a compact horizontal analytics view alongside a scrollable multi-metric view. System tools keep Bluetooth diagnostics and recovery actions close at hand.
+
 ## Privacy
 
 OpenLifeSpan is local-first:
