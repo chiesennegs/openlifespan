@@ -4,8 +4,13 @@ import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.BroadcastReceiver
@@ -32,13 +37,95 @@ import java.util.UUID
 class MainActivity : Activity() {
     private val lifespanDeviceName = "LifeSpan"
     private val logFileName = "openlifespan-log.txt"
+    private val lifespanServiceUuid: UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
+    private val lifespanNotifyUuid: UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
+    private val lifespanWriteUuid: UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
+    private val clientCharacteristicConfigUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     private val serialPortProfileUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
     private val rfcommProbeChannels = (1..30).toList()
     private lateinit var logView: TextView
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanning = false
     private var receiverRegistered = false
+    private var activeGatt: BluetoothGatt? = null
     private var activeSocket: BluetoothSocket? = null
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            appendLog("gatt state status=$status newState=${newState.toBluetoothStateName()}")
+            if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
+                activeGatt = gatt
+                appendLog("gatt connected; discovering services")
+                gatt.discoverServices()
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                appendLog("gatt disconnected")
+                gatt.close()
+                if (activeGatt == gatt) activeGatt = null
+            }
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            appendLog("gatt services discovered status=$status count=${gatt.services.size}")
+            gatt.services.forEach { service ->
+                appendLog("gatt service ${service.uuid}")
+                service.characteristics.forEach { characteristic ->
+                    appendLog("gatt characteristic ${characteristic.uuid} props=${characteristic.properties.toCharacteristicProperties()}")
+                    characteristic.descriptors.forEach { descriptor ->
+                        appendLog("gatt descriptor ${descriptor.uuid} for ${characteristic.uuid}")
+                    }
+                }
+            }
+
+            val service = gatt.getService(lifespanServiceUuid)
+            if (service == null) {
+                appendLog("LifeSpan service not found: $lifespanServiceUuid")
+                return
+            }
+
+            val notifyCharacteristic = service.getCharacteristic(lifespanNotifyUuid)
+            if (notifyCharacteristic == null) {
+                appendLog("LifeSpan notify characteristic not found: $lifespanNotifyUuid")
+                return
+            }
+
+            val notificationSet = gatt.setCharacteristicNotification(notifyCharacteristic, true)
+            appendLog("LifeSpan notification local set=$notificationSet")
+            val descriptor = notifyCharacteristic.getDescriptor(clientCharacteristicConfigUuid)
+            if (descriptor == null) {
+                appendLog("LifeSpan notification descriptor not found: $clientCharacteristicConfigUuid")
+            } else {
+                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                val writeStarted = gatt.writeDescriptor(descriptor)
+                appendLog("LifeSpan notification descriptor writeStarted=$writeStarted")
+            }
+
+            val readStarted = gatt.readCharacteristic(notifyCharacteristic)
+            appendLog("LifeSpan notify readStarted=$readStarted")
+
+            val writeCharacteristic = service.getCharacteristic(lifespanWriteUuid)
+            appendLog("LifeSpan write characteristic present=${writeCharacteristic != null}")
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            appendLog("gatt read ${characteristic.uuid} status=$status value=${characteristic.value?.toHex().orEmpty()}")
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            appendLog("gatt notify ${characteristic.uuid} value=${characteristic.value?.toHex().orEmpty()}")
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            appendLog("gatt descriptor write ${descriptor.uuid} status=$status")
+        }
+    }
 
     private val classicReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -115,7 +202,11 @@ class MainActivity : Activity() {
             setOnClickListener { clearLog() }
         }
         val connectButton = Button(this).apply {
-            text = "Connect"
+            text = "GATT Connect"
+            setOnClickListener { connectGattToLifespan() }
+        }
+        val sppButton = Button(this).apply {
+            text = "SPP Probe"
             setOnClickListener { connectToLifespan() }
         }
         logView = TextView(this).apply {
@@ -126,6 +217,10 @@ class MainActivity : Activity() {
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(connectButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(sppButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -258,6 +353,7 @@ class MainActivity : Activity() {
             receiverRegistered = false
         }
         activeSocket?.closeQuietly()
+        activeGatt?.close()
         super.onDestroy()
     }
 
@@ -416,6 +512,36 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun connectGattToLifespan() {
+        if (!hasConnectPermission()) {
+            appendLog("missing Bluetooth connect permission")
+            requestNeededPermissions()
+            return
+        }
+
+        val device = findLifespanDevice()
+        if (device == null) {
+            appendLog("no bonded $lifespanDeviceName device found")
+            return
+        }
+
+        bluetoothAdapter?.cancelDiscovery()
+        activeGatt?.close()
+        appendLog("gatt connect probe started name=${device.name} address=${device.address} type=${device.type}")
+        activeGatt = if (Build.VERSION.SDK_INT >= 23) {
+            device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } else {
+            device.connectGatt(this, false, gattCallback)
+        }
+        appendLog("gatt connect requested")
+    }
+
+    private fun findLifespanDevice(): BluetoothDevice? {
+        if (!hasConnectPermission()) return null
+        return bluetoothAdapter?.bondedDevices.orEmpty()
+            .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
+    }
+
     private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
         val method = javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
         return method.invoke(this, channel) as BluetoothSocket
@@ -488,7 +614,31 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun ByteArray.toHex(length: Int): String {
+    private fun ByteArray.toHex(length: Int = size): String {
         return take(length).joinToString(" ") { byte -> "%02X".format(byte) }
+    }
+
+    private fun Int.toBluetoothStateName(): String {
+        return when (this) {
+            BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+            BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+            BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+            BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+            else -> "UNKNOWN($this)"
+        }
+    }
+
+    private fun Int.toCharacteristicProperties(): String {
+        val properties = buildList {
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_BROADCAST != 0) add("broadcast")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("read")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) add("writeNoResponse")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("write")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("notify")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("indicate")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE != 0) add("signedWrite")
+            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_EXTENDED_PROPS != 0) add("extended")
+        }
+        return if (properties.isEmpty()) "none($this)" else properties.joinToString("|")
     }
 }

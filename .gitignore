@@ -1,9 +1,11 @@
 .gradle/
+.gradle-home/
 .idea/
 .kotlin/
 build/
 local.properties
 captures/
+analysis/
 *.apk
 *.aab
 *.keystore
