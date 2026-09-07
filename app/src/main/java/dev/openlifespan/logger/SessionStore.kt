@@ -22,10 +22,18 @@ class SessionStore(private val context: Context) {
     }
 
     fun add(session: WorkoutSession): List<WorkoutSession> {
-        val sessions = (listOf(session) + load()).distinctBy { it.id }
+        val existing = load()
+        val sessions = if (existing.any { it.contentKey() == session.contentKey() }) {
+            existing
+        } else {
+            listOf(session) + existing
+        }
         save(sessions)
         return sessions
     }
+
+    fun containsEquivalent(session: WorkoutSession): Boolean =
+        load().any { it.contentKey() == session.contentKey() }
 
     fun replaceAll(sessions: List<WorkoutSession>) {
         save(sessions.sortedByDescending { it.capturedAtMillis })

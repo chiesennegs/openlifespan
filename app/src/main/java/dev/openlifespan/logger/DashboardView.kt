@@ -1,0 +1,53 @@
+package dev.openlifespan.logger
+
+import android.content.Context
+import android.graphics.*
+import android.view.*
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.math.*
+
+class DashboardView(context: Context) : View(context) {
+    var sessions: List<WorkoutSession> = emptyList()
+    var period = TrendPeriod.DAY
+    var onDatePickerRequested: (() -> Unit)? = null
+    var onZoneInfo: (() -> Unit)? = null
+    private val settings=context.getSharedPreferences("settings",0)
+    private val light=settings.getBoolean("lightMode",false)
+    private val bg=if(light) 0xffffffff.toInt() else 0xff131b2e.toInt()
+    private val base=if(light) 0xfff4f7fb.toInt() else 0xff090d16.toInt()
+    private val panel=if(light) 0xffe8eef8.toInt() else 0xff1e293b.toInt()
+    private val ink=if(light) 0xff0f172a.toInt() else 0xfff8fafc.toInt()
+    private val muted=if(light) 0xff475569.toInt() else 0xff94a3b8.toInt()
+    private val grid=if(light) 0xffcbd5e1.toInt() else 0xff334155.toInt()
+    private val cyan=0xff06b6d4.toInt(); private val green=0xff10b981.toInt(); private val amber=0xfff59e0b.toInt()
+    private val p=Paint(Paint.ANTI_ALIAS_FLAG)
+    private var offset=0; private var aView=true; private var chosen=Metric.DISTANCE; private var scroll=0f; private var dayStart=7; private var lastY=0f; private var lastX=0f; private var dragging=false
+    private var hours=false; private var kmOverride:Boolean?=null; private var intervalTotals=true; private var framePoints:List<TrendPoint> = emptyList()
+    private enum class Metric(val title:String,val color:Int){ DISTANCE("DISTANCE",0xff06b6d4.toInt()), TIME("TIME",0xff10b981.toInt()), CALORIES("CALORIES",0xfff59e0b.toInt()), STEPS("STEPS",0xffa855f7.toInt()) }
+    private fun km()=kmOverride?:settings.getBoolean("useKilometers",false)
+    private fun unit()=if(km())"km" else "mi"
+    private fun dist(v:Double)=if(km())v*1.60934 else v
+    private fun time(v:Double)=if(hours)"%.1fh".format(Locale.US,v/3600) else "${(v/60).roundToInt()}m"
+    private fun label(v:Double,m:Metric)=when(m){Metric.DISTANCE->"%.1f".format(Locale.US,dist(v));Metric.TIME->time(v);Metric.CALORIES->v.roundToInt().toString();Metric.STEPS->v.roundToInt().toString()}
+    private fun title(m:Metric)=when(m){Metric.DISTANCE->"DISTANCE (${unit()})";Metric.TIME->"TIME (${if(hours)"hours" else "minutes"})";Metric.CALORIES->"CALORIES (kcal)";Metric.STEPS->"STEPS"}
+    override fun onMeasure(ws:Int,hs:Int){val w=MeasureSpec.getSize(ws).takeIf{it>0}?:440;setMeasuredDimension(w,resolveSize((820f*w/440).roundToInt(),hs))}
+    override fun onDraw(c:Canvas){framePoints=if(period==TrendPeriod.DAY) emptyList() else TrendCalculator.points(sessions,period,now().timeInMillis);val s=width/440f;val h=min(820f,height/s);c.drawColor(base);c.save();c.scale(s,s);round(c,14f,12f,426f,h-4,bg,34f);tabs(c);nav(c);activity(c,h);metrics(c,h);c.restore()}
+    private fun round(c:Canvas,l:Float,t:Float,r:Float,b:Float,col:Int,rad:Float){p.color=col;p.style=Paint.Style.FILL;c.drawRoundRect(l,t,r,b,rad,rad,p)}
+    private fun text(c:Canvas,v:String,x:Float,y:Float,z:Float,col:Int,a:Paint.Align=Paint.Align.LEFT,b:Boolean=false){p.color=col;p.textSize=z;p.textAlign=a;p.typeface=if(b)Typeface.DEFAULT_BOLD else Typeface.DEFAULT;c.drawText(v,x,y,p)}
+    private fun tabs(c:Canvas){round(c,32f,34f,408f,84f,base,14f);TrendPeriod.values().forEachIndexed{i,v->val l=34+i*93.5f;if(v==period)round(c,l,39f,l+93.5f,79f,panel,11f);text(c,v.label.uppercase(),l+46.7f,65f,14f,if(v==period)cyan else muted,Paint.Align.CENTER,true)}}
+    private fun now()=Calendar.getInstance().apply{when(period){TrendPeriod.DAY->add(Calendar.DAY_OF_YEAR,offset);TrendPeriod.WEEK->add(Calendar.WEEK_OF_YEAR,offset);TrendPeriod.MONTH->add(Calendar.MONTH,offset);TrendPeriod.YEAR->add(Calendar.YEAR,offset)}} 
+    private fun nav(c:Canvas){round(c,32f,96f,408f,146f,panel,15f);text(c,"‹",56f,129f,30f,cyan,Paint.Align.CENTER,true);text(c,"›",384f,129f,25f,cyan,Paint.Align.CENTER,true);val d=now();val f=SimpleDateFormat("MMM d, yyyy",Locale.US);val v=when(period){TrendPeriod.DAY->f.format(d.time);TrendPeriod.WEEK->"Week of ${f.format(d.time)}";TrendPeriod.MONTH->SimpleDateFormat("MMMM yyyy",Locale.US).format(d.time);TrendPeriod.YEAR->"12 months ending ${SimpleDateFormat("MMM yyyy",Locale.US).format(d.time)}"};text(c,v,220f,127f,19f,ink,Paint.Align.CENTER,true)}
+    private fun activity(c:Canvas,h:Float){val b=min(704f,h-104);round(c,32f,162f,408f,b,base,22f);text(c,"ACTIVITY",52f,200f,17f,muted,b=true);round(c,316f,178f,388f,204f,panel,10f);round(c,if(aView)318f else 352f,180f,if(aView)352f else 386f,202f,if(aView)cyan else amber,8f);text(c,"A",335f,196f,11f,if(aView)base else muted,Paint.Align.CENTER,true);text(c,"B",370f,196f,11f,if(aView)muted else base,Paint.Align.CENTER,true);if(aView)drawA(c,52f,388f,218f,b-16) else drawB(c,52f,388f,218f,b-16)}
+    private fun values(m:Metric):List<Double>{if(period==TrendPeriod.DAY){val a=DoubleArray(12);visible().forEach{s->val h=Calendar.getInstance().apply{timeInMillis=s.capturedAtMillis}.get(Calendar.HOUR_OF_DAY);if(h in dayStart until dayStart+12)a[h-dayStart]+=when(m){Metric.DISTANCE->s.distance;Metric.TIME->s.durationSeconds.toDouble();Metric.CALORIES->s.calories.toDouble();Metric.STEPS->s.steps.toDouble()}};return a.toList()};return framePoints.map{when(m){Metric.DISTANCE->it.distance;Metric.TIME->it.activeSeconds.toDouble();Metric.CALORIES->it.calories.toDouble();Metric.STEPS->it.steps.toDouble()}}}
+    private fun labels()=if(period==TrendPeriod.DAY)(dayStart until dayStart+12).map{"%02d".format(it)} else framePoints.map{it.label}
+    private fun maxV(v:List<Double>,m:Metric)=max(if(m==Metric.TIME)60.0 else if(m==Metric.CALORIES)10.0 else if(m==Metric.STEPS)100.0 else 1.0,v.maxOrNull()?:0.0)
+    private fun drawA(c:Canvas,l:Float,r:Float,t:Float,b:Float){val bh=184f;val maxS=max(0f,bh*Metric.values().size+10f*(Metric.values().size-1)-(b-t));scroll=scroll.coerceIn(0f,maxS);c.save();c.clipRect(l,t,r,b);Metric.values().forEachIndexed{i,m->band(c,l,r,t+i*194-scroll,bh,m)};c.restore()}
+    private fun band(c:Canvas,l:Float,r:Float,t:Float,h:Float,m:Metric){round(c,l,t,r,t+h,0x22000000,12f);text(c,title(m),l+12,t+23,13f,m.color,b=true);val vs=values(m);val mx=maxV(vs,m);val pl=l+34;val pr=r-12;val pt=t+40;val bl=t+h-25;p.color=grid;p.strokeWidth=1.5f;for(i in 1..3)c.drawLine(pl,pt+(bl-pt)*i/4,pr,pt+(bl-pt)*i/4,p);vs.forEachIndexed{i,v->val x=pl+(pr-pl)*(i+.5f)/vs.size;if(v>0){val bh=(v/mx*(bl-pt-22)).toFloat();round(c,x-9,bl-bh,x+9,bl,m.color,3f);text(c,label(v,m),x,bl-bh-6,11f,ink,Paint.Align.CENTER,true)};text(c,labels()[i],x,bl+19,10f,muted,Paint.Align.CENTER)}}
+    private fun drawB(c:Canvas,l:Float,r:Float,t:Float,b:Float){round(c,l,t,r,t+36,panel,11f);Metric.values().forEachIndexed{i,m->val x=l+i*(r-l)/4;if(m==chosen)round(c,x+2,t+2,x+(r-l)/4-2,t+34,m.color,9f);text(c,m.title,x+(r-l)/8,t+23,9f,if(m==chosen)base else muted,Paint.Align.CENTER,true)};text(c,title(chosen),l,t+62,14f,chosen.color,b=true);val vs=values(chosen);val mx=maxV(vs,chosen);val row=(b-t-72)/vs.size;vs.forEachIndexed{i,v->val y=t+72+row*(i+.5f);text(c,labels()[i],l+26,y+5,11f,muted,Paint.Align.RIGHT);round(c,l+52,y-8,r-50,y+8,panel,5f);if(v>0)round(c,l+52,y-8,l+52+((r-l-102)*v/mx).toFloat(),y+8,chosen.color,5f);text(c,label(v,chosen),r-4,y+5,11f,ink,Paint.Align.RIGHT,true)}}
+    private fun visible():List<WorkoutSession>{val e=now().apply{set(Calendar.HOUR_OF_DAY,23);set(Calendar.MINUTE,59)};val s=e.clone() as Calendar;when(period){TrendPeriod.DAY->{};TrendPeriod.WEEK->s.add(Calendar.DAY_OF_YEAR,-6);TrendPeriod.MONTH->s.add(Calendar.MONTH,-1);TrendPeriod.YEAR->s.add(Calendar.YEAR,-1)};s.set(Calendar.HOUR_OF_DAY,0);s.set(Calendar.MINUTE,0);return sessions.filter{it.capturedAtMillis in s.timeInMillis..e.timeInMillis}}
+    private fun metrics(c:Canvas,h:Float){val t=min(h-76,744f);val ss=if(intervalTotals)visible() else sessions;val d=ss.sumOf{it.distance};val sec=ss.sumOf{it.durationSeconds};text(c,if(intervalTotals)"INTERVAL / ALL-TIME" else "ALL-TIME / INTERVAL",220f,t-8,11f,cyan,Paint.Align.CENTER,true);listOf("DISTANCE" to "${label(d,Metric.DISTANCE)} ${unit()}","TIME" to time(sec.toDouble()),"AVG SPEED" to "%.1f mph".format(if(sec==0)0.0 else d/(sec/3600.0))).forEachIndexed{i,v->val l=40+i*125f;round(c,l,t,l+109,t+66,base,15f);text(c,v.first,l+54,t+25,10f,muted,Paint.Align.CENTER,true);text(c,v.second,l+54,t+51,17f,ink,Paint.Align.CENTER,true)}}
+    override fun onTouchEvent(e:MotionEvent):Boolean{val s=width/440f;val x=e.x/s;val y=e.y/s;val bot=min(680f,height/s-126);val metricTop=min(height/s-76f,744f);when(e.action){MotionEvent.ACTION_DOWN->{lastY=y;lastX=x;dragging=y in 218f..bot;return true};MotionEvent.ACTION_MOVE->if(dragging){val dx=x-lastX;val dy=y-lastY;if(aView&&abs(dy)>=abs(dx)&&abs(dy)>4){scroll+=lastY-y;lastY=y}else if(period==TrendPeriod.DAY&&aView&&abs(dx)>14){moveDay(if(dx<0)1 else -1);lastX=x}else if(period==TrendPeriod.DAY&&!aView&&abs(dy)>14){moveDay(if(dy<0)1 else -1);lastY=y}else if(!aView&&period!=TrendPeriod.DAY&&abs(dy)>14){offset+=if(dy<0)1 else -1;lastY=y};invalidate();return true};MotionEvent.ACTION_UP->{dragging=false;if(y in metricTop-30f..metricTop){intervalTotals=!intervalTotals}else if(y in 34f..84f){period=TrendPeriod.values()[((x-34)/93.5f).toInt().coerceIn(0,3)];offset=0;hours=period!=TrendPeriod.DAY;scroll=0f;dayStart=7}else if(y in 96f..146f){if(x<100)offset-- else if(x>340)offset++ else onDatePickerRequested?.invoke();scroll=0f}else if(y in 178f..204f&&x>316){aView=x<352;scroll=0f}else if(!aView&&y in 218f..254f){chosen=Metric.values()[((x-52)/(336f/Metric.values().size)).toInt().coerceIn(0,Metric.values().lastIndex)]}else if(!aView&&y in 254f..290f){if(chosen==Metric.TIME)hours=!hours;if(chosen==Metric.DISTANCE)kmOverride=!km()}else if(aView&&y in 218f..bot){val n=((y-218+scroll)/194).toInt();if(((y-218+scroll)%194)<50&&n in 0..2){if(n==0)kmOverride=!km();if(n==1)hours=!hours}};invalidate();return true}};return true}
+    private fun moveDay(delta:Int){val next=dayStart+delta;if(next in 0..12)dayStart=next else {offset+=if(delta>0)1 else -1;dayStart=if(delta>0)0 else 12}}
+    fun selectDate(millis: Long) { val now=Calendar.getInstance(); val chosen=Calendar.getInstance().apply { timeInMillis=millis }; offset=when(period){ TrendPeriod.DAY->((chosen.timeInMillis-now.timeInMillis)/86_400_000L).toInt(); TrendPeriod.WEEK->((chosen.timeInMillis-now.timeInMillis)/(7*86_400_000L)).toInt(); TrendPeriod.MONTH->(chosen.get(Calendar.YEAR)-now.get(Calendar.YEAR))*12+chosen.get(Calendar.MONTH)-now.get(Calendar.MONTH); TrendPeriod.YEAR->chosen.get(Calendar.YEAR)-now.get(Calendar.YEAR) }; dayStart=7; scroll=0f; invalidate() }
+}

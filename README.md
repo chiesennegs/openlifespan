@@ -36,6 +36,30 @@ The first app version can:
 - Reset the BLE session deterministically when Android's GATT stack gets stuck.
 - Keep an app-private debug log for troubleshooting.
 
+## Design and Function Progress
+
+The current prototype has expanded beyond the original logger into a local-first activity dashboard:
+
+- A modern dark/light visual theme with the OpenLifeSpan smiling treadmill mark.
+- Main dashboard navigation for Day, Week, Month, and Year views.
+- Period navigation with previous/next controls, including historical years.
+- BLE connectivity status, Sync Only, Sync and Reset, and a compact Speed action with a confirmation-backed slider from 0.4 to 4.0 mph.
+- Local session persistence with JSON and CSV export/import.
+- Settings, Data, History, and System sections in the kebab menu.
+- Miles/kilometers preference and converted distance displays.
+- Interval versus All-Time totals.
+- Mock-data loading and unloading for chart testing, while preserving real sessions.
+- Mock-data storage-size reporting and oldest-record provenance on the Data page.
+- Aggregation and trend exploration for day, week, month, and year periods.
+
+### Visualization status and known limitation
+
+The requested D/W/M/Y visualization design was iterated extensively, including distance and time bands, period-specific aggregation, readable value labels, a 12-hour Day viewport beginning at 07:00, and horizontal Day navigation.
+
+However, the current implementation did not reach an acceptable production-quality rendering. The custom Canvas/layout approach repeatedly produced overlapping labels, clipped totals, clipped lower content, and inconsistent spacing across screen sizes and chart periods. In particular, chart annotations and axes could still collide or be cut off despite repeated fixes.
+
+This is an explicit handoff limitation: completing the design correctly requires a more capable model and a more rigorous implementation approach, including constraint-based responsive layouts, a dedicated charting component or library, and screenshot/device-size regression tests. The existing visualization code should be considered prototype work rather than a finished UI.
+
 ## Project Phases
 
 1. BLE discovery logger - done

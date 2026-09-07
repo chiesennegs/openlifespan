@@ -15,8 +15,15 @@ data class WorkoutSession(
     val steps: Int,
     val maxSpeed: Double?,
     val units: Int?,
-    val averageSpeed: Double
+    val averageSpeed: Double,
+    val isMock: Boolean = false
 ) {
+    /** Stable content key used to prevent repeated reads of the same console counters. */
+    fun contentKey(): String = listOf(
+        durationSeconds, "%.4f".format(Locale.US, distance), calories, steps,
+        maxSpeed?.let { "%.4f".format(Locale.US, it) }, units
+    ).joinToString("|")
+
     fun toJson(): JSONObject {
         return JSONObject()
             .put("id", id)
@@ -28,6 +35,7 @@ data class WorkoutSession(
             .put("maxSpeed", maxSpeed)
             .put("units", units)
             .put("averageSpeed", averageSpeed)
+            .put("isMock", isMock)
     }
 
     fun displayTitle(): String {
@@ -46,7 +54,8 @@ data class WorkoutSession(
                 steps = json.getInt("steps"),
                 maxSpeed = if (json.isNull("maxSpeed")) null else json.getDouble("maxSpeed"),
                 units = if (json.isNull("units")) null else json.getInt("units"),
-                averageSpeed = json.getDouble("averageSpeed")
+                averageSpeed = json.getDouble("averageSpeed"),
+                isMock = json.optBoolean("isMock", false)
             )
         }
 

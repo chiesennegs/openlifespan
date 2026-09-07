@@ -1,0 +1,61 @@
+package dev.openlifespan.logger
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.os.Bundle
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
+import android.widget.Switch
+import android.widget.ImageView
+import android.widget.ScrollView
+import java.util.Locale
+
+class SettingsActivity : Activity() {
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private val lightMode get() = getSharedPreferences("settings", 0).getBoolean("lightMode", false)
+    private val foreground get() = if (lightMode) 0xff0f172a.toInt() else 0xfff8fafc.toInt()
+    private val muted get() = if (lightMode) 0xff475569.toInt() else 0xff94a3b8.toInt()
+    companion object { const val EXTRA_SECTION = "section"; private const val CREATE = 12; private const val OPEN = 13 }
+    private lateinit var store: SessionStore
+    private var pendingExport = ""
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val light = getSharedPreferences("settings", MODE_PRIVATE).getBoolean("lightMode", false)
+        if (light) setTheme(R.style.AppThemeLight)
+        super.onCreate(savedInstanceState); store = SessionStore(this)
+        window.navigationBarColor = if (light) 0xfff4f7fb.toInt() else 0xff090d16.toInt()
+        if (android.os.Build.VERSION.SDK_INT >= 26 && light) window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        val section = intent.getStringExtra(EXTRA_SECTION) ?: "Settings"
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(32), dp(44), dp(32), dp(32)); setBackgroundColor(if (lightMode) 0xfff4f7fb.toInt() else 0xff090d16.toInt()) }
+        root.addView(TextView(this).apply { text = section; textSize = 30f; setTextColor(this@SettingsActivity.foreground) })
+        root.addView(TextView(this).apply { text = "OpenLifeSpan"; textSize = 14f; setTextColor(this@SettingsActivity.muted); setPadding(0, dp(4), 0, dp(28)) })
+        when (section) { "Data" -> addData(root); "History" -> addHistory(root); "System" -> addSystem(root); "Help" -> addHelp(root); else -> addSettings(root) }
+        if (section == "Settings" || section == "System") {
+            root.addView(android.widget.Space(this), LinearLayout.LayoutParams(1, 0, 1f))
+            root.addView(ImageView(this).apply { setImageResource(R.drawable.openlifespan_mascot); scaleType = ImageView.ScaleType.CENTER_INSIDE }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)).apply { topMargin = dp(16) })
+        }
+        setContentView(root)
+    }
+    private fun addSettings(root: LinearLayout) {
+        val lightSwitch = Switch(this).apply { text = "Light mode"; setTextColor(this@SettingsActivity.foreground); isChecked = lightMode; setOnCheckedChangeListener { _, checked -> getSharedPreferences("settings", 0).edit().putBoolean("lightMode", checked).apply(); sendBroadcast(Intent(MainActivity.ACTION_TOGGLE_THEME)); recreate() } }
+        root.addView(lightSwitch)
+        val metricSwitch = Switch(this).apply { text = "Use kilometers"; setTextColor(this@SettingsActivity.foreground); isChecked = getSharedPreferences("settings", 0).getBoolean("useKilometers", false); setOnCheckedChangeListener { _, checked -> getSharedPreferences("settings", 0).edit().putBoolean("useKilometers", checked).apply(); sendBroadcast(Intent(MainActivity.ACTION_TOGGLE_UNITS)) } }
+        root.addView(metricSwitch)
+        root.addView(label("Default speed")); val value = TextView(this).apply { textSize = 18f; setTextColor(this@SettingsActivity.foreground) }; val slider = SeekBar(this).apply { max = 36; progress = 21 }
+        fun update() { value.text = "${"%.1f".format(Locale.US, 0.4 + slider.progress / 10.0)} mph" }
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(b: SeekBar?, p: Int, u: Boolean) = update(); override fun onStartTrackingTouch(b: SeekBar?) = Unit; override fun onStopTrackingTouch(b: SeekBar?) { sendBroadcast(Intent(MainActivity.ACTION_SET_SPEED).putExtra(MainActivity.EXTRA_SPEED, 40 + slider.progress * 10)) } })
+        update(); root.addView(value); root.addView(slider)
+    }
+    private fun addData(root: LinearLayout) { root.addView(label("Portable data")); root.addView(action("Export JSON") { pendingExport = SessionTransfer.toJson(store.load()); create("application/json", "openlifespan-sessions.json") }); root.addView(action("Export CSV") { pendingExport = SessionTransfer.toCsv(store.load()); create("text/csv", "openlifespan-sessions.csv") }); root.addView(action("Import JSON") { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "application/json"; addCategory(Intent.CATEGORY_OPENABLE) }, OPEN) }); val all = store.load(); val bytes = getFileStreamPath("openlifespan-sessions.json").length(); val mock = all.count { it.isMock }; val oldest = all.minByOrNull { it.capturedAtMillis }; root.addView(TextView(this).apply { text = buildString { if (mock > 0) append("Mock data: $mock sessions\n"); append("Current data file: ${MockDataGenerator.formatBytes(bytes)}"); if (mock > 0) append("\nAverage mock month: ${MockDataGenerator.formatBytes(bytes / 36)}"); oldest?.let { append("\nOldest record: ${it.displayTitle()} (${if (it.isMock) "Mock" else "Real"})") } }; textSize = 14f; setTextColor(this@SettingsActivity.muted); setPadding(0, dp(16), 0, 0) }) }
+    private fun addHistory(root: LinearLayout) { root.addView(label("Saved sessions")); val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; store.load().forEach { session -> list.addView(TextView(this).apply { text = "${session.displayTitle()}\n${"%.2f".format(Locale.US, session.distance)} mi  •  ${LifeSpanProtocol.formatDuration(session.durationSeconds)}  •  ${session.calories} cal"; textSize = 15f; setTextColor(0xfff8fafc.toInt()); setPadding(0, dp(12), 0, dp(12)) }) }; if (list.childCount == 0) list.addView(TextView(this).apply { text = "No sessions saved yet."; textSize = 15f; setTextColor(0xff94a3b8.toInt()) }); root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)) }
+    private fun addHelp(root: LinearLayout) { fun section(title:String, body:String) { root.addView(label(title)); root.addView(TextView(this).apply { text=body; textSize=15f; setTextColor(this@SettingsActivity.foreground); setPadding(0, 0, 0, dp(16)) }) }; section("Dashboard navigation", "Choose Day, Week, Month, or Year. Tap the date to choose a calendar date, or use the arrows to move intervals. In A, swipe vertically through metrics and horizontally through Day hours. In B, swipe vertically through periods. Tap Distance or Time labels to change units."); section("Treadmill controls", "Sync Only reads and saves console activity. Sync & Clear saves it, then resets console counters. Speed previews changes first; choose Set speed to send it. Only operate the treadmill while supervising it."); section("Bluetooth troubleshooting", "Pair the LifeSpan console in Android Bluetooth settings, then press its Bluetooth button while OpenLifeSpan is in standby. If it stalls, use Reset BLE session in System. Bluetooth / GATT diagnostics records service discovery, packets, timeouts, and resets.") }
+    private fun addSystem(root: LinearLayout) { root.addView(label("System")); root.addView(action("Reset BLE session") { sendBroadcast(Intent(MainActivity.ACTION_RESET_BLE)) }); root.addView(action("Bluetooth / GATT diagnostics") { showSheet("Bluetooth / GATT diagnostics", try { openFileInput("openlifespan-log.txt").bufferedReader().use { it.readText() } } catch (_: Exception) { "No GATT diagnostic entries yet." }) }); root.addView(action("Clear diagnostics log") { showSheet("Clear diagnostics log?", "This removes the active log and its compressed rollover archive.", "Clear") { deleteFile("openlifespan-log.txt"); deleteFile("openlifespan-log-previous.gz") } }); root.addView(action("Version") { showSheet("Version", "OpenLifeSpan 0.1.0\nLocal-first treadmill activity tracker") }); root.addView(action("Licenses") { showSheet("Licenses", "OpenLifeSpan is a clean-room project. Third-party license notices will be added here as dependencies are introduced.") }); root.addView(action("Load Mock Data") { store.replaceAll(store.load().filterNot { it.isMock } + MockDataGenerator.generate()); getSharedPreferences("settings", 0).edit().putBoolean("mockData", true).apply(); showSheet("Mock data loaded", "Three years of randomized treadmill sessions are ready for chart testing.") }); root.addView(action("Unload Mock Data") { val removed = store.load().count { it.isMock }; store.replaceAll(store.load().filterNot { it.isMock }); getSharedPreferences("settings", 0).edit().putBoolean("mockData", false).apply(); showSheet("Mock data unloaded", "Removed $removed mock sessions. Real sessions were preserved.") }) }
+    private fun showSheet(title:String, message:String, action:String="Close", confirm:(()->Unit)?=null) { val d=android.app.Dialog(this); val box=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(24),dp(22),dp(24),dp(20)); background=android.graphics.drawable.GradientDrawable().apply { setColor(if(lightMode)0xffffffff.toInt() else 0xff131b2e.toInt()); cornerRadius=dp(28).toFloat() } }; box.addView(TextView(this).apply { text=title;textSize=22f;setTextColor(this@SettingsActivity.foreground) }); box.addView(TextView(this).apply { text=message;textSize=15f;setTextColor(this@SettingsActivity.muted);setPadding(0,dp(10),0,dp(20)) }); box.addView(action(action){ d.dismiss();confirm?.invoke() }); d.setContentView(box);d.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));d.show();d.window?.setLayout((resources.displayMetrics.widthPixels*.88f).toInt(),android.view.ViewGroup.LayoutParams.WRAP_CONTENT) }
+    private fun label(text: String) = TextView(this).apply { this.text = text; textSize = 14f; setTextColor(if (lightMode) 0xff0891b2.toInt() else 0xff06b6d4.toInt()); setPadding(0, dp(12), 0, dp(8)) }
+    private fun action(text: String, click: () -> Unit) = Button(this).apply { this.text = text; setAllCaps(false); textSize = 16f; minHeight = dp(48); setTextColor(if (lightMode) 0xff0f172a.toInt() else 0xfff8fafc.toInt()); background = android.graphics.drawable.GradientDrawable().apply { setColor(if (lightMode) 0xffe2e8f0.toInt() else 0xff1e293b.toInt()); cornerRadius = dp(16).toFloat() }; setPadding(dp(18), 0, dp(18), 0); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply { topMargin = dp(4); bottomMargin = dp(4) }; setOnClickListener { click() } }
+    private fun create(type: String, name: String) { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply { this.type = type; putExtra(Intent.EXTRA_TITLE, name) }, CREATE) }
+    @Deprecated("Compatibility with minSdk 26") override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (resultCode != RESULT_OK) return; val uri = data?.data ?: return; if (requestCode == CREATE) contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingExport) }; if (requestCode == OPEN) try { val imported = contentResolver.openInputStream(uri)?.bufferedReader()?.use { SessionTransfer.fromJson(it.readText()) }.orEmpty(); store.replaceAll((store.load() + imported).distinctBy { it.contentKey() }) } catch (_: Exception) { } }
+}
