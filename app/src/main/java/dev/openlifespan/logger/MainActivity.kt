@@ -2,6 +2,7 @@ package dev.openlifespan.logger
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -273,6 +274,29 @@ class MainActivity : Activity() {
             text = "Live Snapshot"
             setOnClickListener { sendLiveSnapshotCommands() }
         }
+        val clearStoredDataButton = Button(this).apply {
+            text = "Clear Stored Data"
+            setOnClickListener {
+                confirmCommand(
+                    title = "Clear stored data?",
+                    message = "This sends the legacy clear command AB 01 00 00 00 to the treadmill console."
+                ) {
+                    sendLifespanCommand("clear stored data", byteArrayOf(0xAB.toByte(), 0x01, 0x00, 0x00, 0x00))
+                }
+            }
+        }
+        val setSpeedButton = Button(this).apply {
+            text = "Set Speed 2.5 TEST"
+            setOnClickListener {
+                confirmCommand(
+                    title = "Set speed to 2.5?",
+                    message = "This sends the experimental speed command D0 02 50 00 00. Use only while supervising the treadmill."
+                ) {
+                    sendLifespanCommand("set speed 2.5 test", byteArrayOf(0xD0.toByte(), 0x02, 0x50, 0x00, 0x00))
+                    sendLifespanCommand("speed property 82", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
+                }
+            }
+        }
         val sppButton = Button(this).apply {
             text = "SPP Probe"
             setOnClickListener { connectToLifespan() }
@@ -309,6 +333,14 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(liveSnapshotButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(clearStoredDataButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(setSpeedButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -370,6 +402,15 @@ class MainActivity : Activity() {
         appendBluetoothState()
         appendBondedDevices()
         probeBondedDevices()
+    }
+
+    private fun confirmCommand(title: String, message: String, onConfirm: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("Send") { _, _ -> onConfirm() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun requestNeededPermissions() {
