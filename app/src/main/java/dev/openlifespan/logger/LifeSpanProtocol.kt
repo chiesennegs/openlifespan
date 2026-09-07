@@ -24,6 +24,17 @@ object LifeSpanProtocol {
         return byteArrayOf(0xA1.toByte(), property.toByte(), 0x00, 0x00, 0x00)
     }
 
+    /** Read-only console firmware probe used by Bluetooth diagnostics. */
+    fun requestFirmwareVersion(): ByteArray {
+        return byteArrayOf(0xC2.toByte(), 0x00, 0x00, 0x00, 0x00)
+    }
+
+    /** Firmware replies store major and minor version bytes at offsets two and three. */
+    fun parseFirmwareVersion(value: ByteArray?): Double? {
+        if (value == null || value.size < 4) return null
+        return value[2].toUnsignedInt() + value[3].toUnsignedInt() / 100.0
+    }
+
     fun clearStoredData(): ByteArray {
         return byteArrayOf(0xAB.toByte(), 0x01, 0x00, 0x00, 0x00)
     }

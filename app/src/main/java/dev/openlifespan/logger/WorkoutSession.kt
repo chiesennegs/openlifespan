@@ -16,7 +16,10 @@ data class WorkoutSession(
     val maxSpeed: Double?,
     val units: Int?,
     val averageSpeed: Double,
-    val isMock: Boolean = false
+    val isMock: Boolean = false,
+    /** Exact activity interval. `capturedAtMillis` remains the interval end for dashboard bucketing. */
+    val startedAtMillis: Long = capturedAtMillis - durationSeconds * 1_000L,
+    val endedAtMillis: Long = capturedAtMillis
 ) {
     /** Stable content key used to prevent repeated reads of the same console counters. */
     fun contentKey(): String = listOf(
@@ -36,6 +39,8 @@ data class WorkoutSession(
             .put("units", units)
             .put("averageSpeed", averageSpeed)
             .put("isMock", isMock)
+            .put("startedAtMillis", startedAtMillis)
+            .put("endedAtMillis", endedAtMillis)
     }
 
     fun displayTitle(): String {
@@ -55,7 +60,9 @@ data class WorkoutSession(
                 maxSpeed = if (json.isNull("maxSpeed")) null else json.getDouble("maxSpeed"),
                 units = if (json.isNull("units")) null else json.getInt("units"),
                 averageSpeed = json.getDouble("averageSpeed"),
-                isMock = json.optBoolean("isMock", false)
+                isMock = json.optBoolean("isMock", false),
+                startedAtMillis = json.optLong("startedAtMillis", json.getLong("capturedAtMillis") - json.getInt("durationSeconds") * 1_000L),
+                endedAtMillis = json.optLong("endedAtMillis", json.getLong("capturedAtMillis"))
             )
         }
 

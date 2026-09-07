@@ -1,0 +1,13 @@
+OpenLifeSpan
+Copyright 2026 MooseAI, LLC
+
+OpenLifeSpan is licensed under the Apache License, Version 2.0.
+
+Third-party notices
+-------------------
+This release does not bundle third-party runtime libraries. It uses the Android
+platform APIs and Kotlin/Android build tooling only; no additional third-party
+license notices are required for the distributed application at this time.
+
+OpenLifeSpan is an independent, clean-room project. LifeSpan is a trademark of
+its respective owner and is used only to identify compatible equipment.

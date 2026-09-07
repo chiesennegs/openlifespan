@@ -3,6 +3,8 @@ package dev.openlifespan.logger
 import android.content.Context
 import org.json.JSONArray
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 class SessionStore(private val context: Context) {
     private val fileName = "openlifespan-sessions.json"
@@ -44,8 +46,11 @@ class SessionStore(private val context: Context) {
         sessions.sortedByDescending { it.capturedAtMillis }.forEach { session ->
             array.put(session.toJson())
         }
-        context.openFileOutput(fileName, Context.MODE_PRIVATE).use { output ->
+        val target = context.getFileStreamPath(fileName).toPath()
+        val temporary = context.getFileStreamPath("$fileName.tmp").toPath()
+        Files.newOutputStream(temporary).use { output ->
             output.write(array.toString(2).toByteArray(Charsets.UTF_8))
         }
+        Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
     }
 }

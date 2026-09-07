@@ -43,7 +43,7 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
     private val lightMode: Boolean get() = getSharedPreferences("settings", 0).getBoolean("lightMode", false)
     private var renderedLightMode = false
-    companion object { const val ACTION_SET_SPEED = "dev.openlifespan.SET_SPEED"; const val ACTION_RESET_BLE = "dev.openlifespan.RESET_BLE"; const val ACTION_TOGGLE_THEME = "dev.openlifespan.TOGGLE_THEME"; const val ACTION_TOGGLE_UNITS = "dev.openlifespan.TOGGLE_UNITS"; const val EXTRA_SPEED = "speedHundredths" }
+    companion object { const val ACTION_SET_SPEED = "dev.openlifespan.SET_SPEED"; const val ACTION_RESET_BLE = "dev.openlifespan.RESET_BLE"; const val ACTION_PROBE_FIRMWARE = "dev.openlifespan.PROBE_FIRMWARE"; const val ACTION_TOGGLE_THEME = "dev.openlifespan.TOGGLE_THEME"; const val ACTION_TOGGLE_UNITS = "dev.openlifespan.TOGGLE_UNITS"; const val EXTRA_SPEED = "speedHundredths" }
     private var currentSpeedHundredths = 250
     private val createExportRequest = 401
     private val importRequest = 402
@@ -66,6 +66,7 @@ class MainActivity : Activity() {
     private val settingsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             if (intent?.action == ACTION_RESET_BLE) { resetBleSession(); return }
+            if (intent?.action == ACTION_PROBE_FIRMWARE) { probeFirmwareVersion(); return }
             if (intent?.action == ACTION_TOGGLE_THEME) { recreate(); return }
             if (intent?.action == ACTION_TOGGLE_UNITS) { dashboardView.invalidate(); return }
             val speed = intent?.getIntExtra(EXTRA_SPEED, 250) ?: return
@@ -222,8 +223,8 @@ class MainActivity : Activity() {
         appendLog("OpenLifeSpan ready")
         startAutoConnect()
         try {
-            if (Build.VERSION.SDK_INT >= 33) registerReceiver(settingsReceiver, IntentFilter().apply { addAction(ACTION_SET_SPEED); addAction(ACTION_RESET_BLE); addAction(ACTION_TOGGLE_THEME) }, RECEIVER_NOT_EXPORTED)
-            else registerReceiver(settingsReceiver, IntentFilter().apply { addAction(ACTION_SET_SPEED); addAction(ACTION_RESET_BLE); addAction(ACTION_TOGGLE_THEME) })
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(settingsReceiver, IntentFilter().apply { addAction(ACTION_SET_SPEED); addAction(ACTION_RESET_BLE); addAction(ACTION_PROBE_FIRMWARE); addAction(ACTION_TOGGLE_THEME); addAction(ACTION_TOGGLE_UNITS) }, RECEIVER_NOT_EXPORTED)
+            else registerReceiver(settingsReceiver, IntentFilter().apply { addAction(ACTION_SET_SPEED); addAction(ACTION_RESET_BLE); addAction(ACTION_PROBE_FIRMWARE); addAction(ACTION_TOGGLE_THEME); addAction(ACTION_TOGGLE_UNITS) })
             settingsReceiverRegistered = true
         } catch (exception: RuntimeException) {
             appendLog("settings receiver unavailable: ${exception.message}")
@@ -400,15 +401,16 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingExport.orEmpty()) }
                 updateStatus("Export complete")
             } else if (requestCode == importRequest) {
-                val imported = contentResolver.openInputStream(uri)?.bufferedReader()?.use { SessionTransfer.fromJson(it.readText()) }.orEmpty()
-                val before = store.load().size
-                store.replaceAll(store.load().plus(imported).distinctBy { it.contentKey() })
+                val imported = contentResolver.openInputStream(uri)?.use { SessionTransfer.read(it) }.orEmpty()
+                val result = SessionTransfer.mergeImport(store.load(), imported)
+                store.replaceAll(result.sessions)
                 refreshHistory()
-                updateStatus("Imported ${store.load().size - before} new sessions")
+                updateStatus("Import: ${result.added} added, ${result.replaced} replaced, ${result.skipped} skipped")
+                appendLog("import complete added=${result.added} replaced=${result.replaced} skipped=${result.skipped}")
             }
         } catch (exception: Exception) {
             updateStatus("Data transfer failed")
-            appendLog("data transfer failed: ${exception.message}")
+            appendLog("import failed: ${exception.message}")
         }
     }
 
@@ -637,6 +639,26 @@ class MainActivity : Activity() {
         enqueueCommand("escape to idle", LifeSpanProtocol.escapeToIdle()) { value ->
             appendLog("escape to idle status=${value?.toHex().orEmpty()}")
             updateStatus("Console clear sent")
+        }
+    }
+
+    private fun probeFirmwareVersion() {
+        if (activeGatt == null || activeWriteCharacteristic == null) {
+            updateStatus("Firmware probe needs a connected console")
+            appendLog("firmware probe skipped: console is disconnected")
+            return
+        }
+        updateStatus("Reading console firmware")
+        enqueueCommand("firmware version", LifeSpanProtocol.requestFirmwareVersion()) { value ->
+            val version = LifeSpanProtocol.parseFirmwareVersion(value)
+            if (version == null) {
+                appendLog("firmware probe failed rx=${value?.toHex().orEmpty()}")
+                updateStatus("Firmware probe did not return a version")
+            } else {
+                val formatted = "%.2f".format(Locale.US, version)
+                appendLog("console firmware version=$formatted rx=${value?.toHex().orEmpty()}")
+                updateStatus("Console firmware $formatted")
+            }
         }
     }
 

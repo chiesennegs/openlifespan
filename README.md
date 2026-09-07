@@ -1,87 +1,57 @@
 # OpenLifeSpan
 
-OpenLifeSpan is a clean-room, local-first companion app for LifeSpan treadmill owners who want to sync activity without relying on unsupported legacy apps or LifeSpan cloud services.
+OpenLifeSpan is a clean-room, local-first Android companion for compatible LifeSpan treadmills. It reads treadmill activity over Bluetooth Low Energy (BLE), keeps workout history on the phone, and presents it in Day, Week, Month, and Year dashboards—without a LifeSpan account or cloud service.
 
-The initial target device is the LifeSpan TR-1200 DT3 treadmill console.
+Created by [MooseAI, LLC](https://mooseaillc.com) · Support: [support@mooseaillc.com](mailto:support@mooseaillc.com)
 
-## Goals
+## What it does
 
-- Discover and document the treadmill Bluetooth protocol.
-- Sync treadmill activity directly to a modern Android app.
-- Store workout history locally.
-- Aggregate activity by day, week, month, and year.
-- Provide richer trend analytics than the legacy app.
-- Support import/export in open formats such as CSV and JSON.
-- Avoid LifeSpan server communication entirely.
-- Avoid copying proprietary code, branding, UI, or assets from legacy apps.
+- Connects directly to compatible LifeSpan treadmill consoles over BLE.
+- Syncs distance, elapsed time, calories, steps, speed, and units into local session history.
+- Provides Day/Week/Month/Year charts, interval versus all-time totals, miles/kilometers, and hours/minutes views.
+- Supports two chart layouts, horizontal navigation, calendar-based date selection, and in-app usage guidance.
+- Offers a guarded speed-control interface and a separate Sync & Clear flow for console counters.
+- Includes GATT diagnostics, firmware probing, bounded rotating logs, and a BLE reset action for troubleshooting.
+- Exports readable, versioned JSON backups and CSV. Import validates data before applying it; restore replaces the local database atomically.
 
-## Non-Goals
+The initial hardware target is the LifeSpan TR-1200 DT3 console. Other compatible LifeSpan consoles may work, but have not yet been verified.
 
-- No LifeSpan account login.
-- No LifeSpan cloud sync.
-- No bundled trackers, ads, or social SDKs.
-- No redistribution of LifeSpan proprietary assets.
+## Privacy
 
-## Current Version
+OpenLifeSpan is local-first:
 
-The first app version can:
+- No account, cloud sync, analytics SDK, ads, trackers, or social SDKs.
+- Workout history and diagnostic logs remain in app-private storage unless you explicitly export them.
+- The app communicates only with the treadmill console over Bluetooth.
 
-- Stay in a BLE standby mode so it is ready when the console Bluetooth button is pressed.
-- Sync the current console counters for distance, duration, calories, steps, max speed, and units.
-- Save synced sessions locally on the phone.
-- Show today's totals and a recent-session history.
-- Compute average speed from synced distance and elapsed time.
-- Manually clear stored console activity after confirmation.
-- Manually restore or adjust treadmill speed with confirmation.
-- Reset the BLE session deterministically when Android's GATT stack gets stuck.
-- Keep an app-private debug log for troubleshooting.
+## Safety
 
-## Design and Function Progress
+Speed and console-reset actions are intentionally confirmation-gated. Only operate a treadmill while supervising it, with the safety key and manufacturer safeguards in place. OpenLifeSpan is not medical software.
 
-The current prototype has expanded beyond the original logger into a local-first activity dashboard:
+## Install a development build
 
-- A modern dark/light visual theme with the OpenLifeSpan smiling treadmill mark.
-- Main dashboard navigation for Day, Week, Month, and Year views.
-- Period navigation with previous/next controls, including historical years.
-- BLE connectivity status, Sync Only, Sync and Reset, and a compact Speed action with a confirmation-backed slider from 0.4 to 4.0 mph.
-- Local session persistence with JSON and CSV export/import.
-- Settings, Data, History, and System sections in the kebab menu.
-- Miles/kilometers preference and converted distance displays.
-- Interval versus All-Time totals.
-- Mock-data loading and unloading for chart testing, while preserving real sessions.
-- Mock-data storage-size reporting and oldest-record provenance on the Data page.
-- Aggregation and trend exploration for day, week, month, and year periods.
+Requirements: Android Studio with an Android SDK and JDK 17. The app supports Android 8.0 (API 26) and newer.
 
-### Visualization status and known limitation
+```bash
+git clone https://github.com/chiesennegs/openlifespan.git
+cd openlifespan
+./gradlew :app:assembleDebug
+```
 
-The requested D/W/M/Y visualization design was iterated extensively, including distance and time bands, period-specific aggregation, readable value labels, a 12-hour Day viewport beginning at 07:00, and horizontal Day navigation.
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. Install it from Android Studio or with `adb install`.
 
-However, the current implementation did not reach an acceptable production-quality rendering. The custom Canvas/layout approach repeatedly produced overlapping labels, clipped totals, clipped lower content, and inconsistent spacing across screen sizes and chart periods. In particular, chart annotations and axes could still collide or be cut off despite repeated fixes.
+## Data portability
 
-This is an explicit handoff limitation: completing the design correctly requires a more capable model and a more rigorous implementation approach, including constraint-based responsive layouts, a dedicated charting component or library, and screenshot/device-size regression tests. The existing visualization code should be considered prototype work rather than a finished UI.
+Use **Data → Export backup** for a full JSON backup and **Data → Restore backup** to atomically replace the local history. Use **Import activity** to merge activity: imported sessions replace local sessions whose activity intervals overlap at millisecond precision; non-overlapping sessions are retained.
 
-## Project Phases
+Backups use UTC ISO 8601 timestamps with millisecond precision. Imports are streamed and constrained to 64 MiB and 100,000 sessions, then validated before local data changes.
 
-1. BLE discovery logger - done
-   - Scan for nearby Bluetooth LE devices.
-   - Identify the treadmill console by name, advertisement data, services, and characteristics.
-   - Capture reads, writes, and notifications during treadmill sync.
+## Development notes
 
-2. Protocol decoder - in progress
-   - Map raw packets to workout fields: duration, distance, calories, steps, speed, and timestamps.
-   - Build repeatable fixtures from real capture logs.
+This project intentionally treats legacy-app behavior as compatibility research only. It does not copy decompiled source, proprietary assets, branding, or cloud services. Protocol work is documented through clean-room BLE diagnostics and testing.
 
-3. Local activity app - in progress
-   - Persist workouts locally.
-   - Show daily, weekly, monthly, and yearly summaries.
-   - Add trends, streaks, personal bests, and export/import.
+Contributions are welcome. Please keep changes local-first, avoid adding tracking dependencies, and include a clear description and test/build result with pull requests.
 
-4. Optional integrations
-   - Health Connect export.
-   - Google Fit export if still useful for the target Android versions.
+## License and notices
 
-## Development Notes
-
-This repository intentionally starts with a minimal Android BLE logger. The logger exists to learn the treadmill protocol safely before building the polished activity tracker.
-
-Anything learned from the legacy XAPK should be treated as behavioral compatibility research only. Do not copy decompiled source, proprietary assets, or branding.
+Copyright 2026 MooseAI, LLC. OpenLifeSpan is licensed under the [Apache License, Version 2.0](LICENSE), a permissive license with an explicit patent grant. See [NOTICE](NOTICE) for attribution and third-party-notice information. This release has no bundled third-party runtime dependencies requiring additional notices.
