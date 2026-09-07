@@ -242,9 +242,14 @@ class MainActivity : Activity() {
         val syncHandshakeButton = Button(this).apply {
             text = "Sync Handshake"
             setOnClickListener {
+                sendLifespanCommand("stopped state", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
                 sendLifespanCommand("multi-user", byteArrayOf(0xAC.toByte(), 0x00, 0x00, 0x00, 0x00))
                 sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00))
             }
+        }
+        val recordStreamButton = Button(this).apply {
+            text = "Begin Record Stream"
+            setOnClickListener { sendLifespanCommand("record stream", byteArrayOf(0xAB.toByte(), 0x00, 0x00, 0x00, 0x00)) }
         }
         val firstRecordButton = Button(this).apply {
             text = "Query First Record"
@@ -277,6 +282,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(syncHandshakeButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(recordStreamButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))

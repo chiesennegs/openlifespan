@@ -47,6 +47,7 @@ BLE command clues from legacy bytecode:
 - `AB 00 RR RR 00` asks for a single stored record by 1-based record number, where `RR RR` is the big-endian record number.
 - `AB 00 00 01 00` asks for stored record 1.
 - `AC 00 00 00 00` asks for multi-user status.
+- `A1 82 00 00 00` queries stopped/running state before sync.
 - `A1 8D 00 00 00` asks for console date.
 - `A1 8E 00 00 00` asks for console time.
 - Valid date/time responses start with `A1 AA`; `A1 FF 00 00 00 00` was observed as the physical treadmill response to a date query with the console in its current state.
