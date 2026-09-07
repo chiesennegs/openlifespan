@@ -47,6 +47,8 @@ class MainActivity : Activity() {
     private val clientCharacteristicConfigUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     private val serialPortProfileUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
     private val rfcommProbeChannels = (1..30).toList()
+    private val autoConnectIntervalMillis = 4_000L
+    private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanning = false
@@ -58,6 +60,20 @@ class MainActivity : Activity() {
     private var writeInFlight = false
     private var inFlightCommand: PendingCommand? = null
     private var activeSocket: BluetoothSocket? = null
+    private var autoConnectEnabled = true
+    private var gattConnectInProgress = false
+
+    private val autoConnectRunnable = object : Runnable {
+        override fun run() {
+            if (autoConnectEnabled) {
+                if (activeGatt == null && !gattConnectInProgress) {
+                    appendLog("auto-connect standby: waiting for console BT window")
+                    connectGattToLifespan(manual = false)
+                }
+                mainHandler.postDelayed(this, autoConnectIntervalMillis)
+            }
+        }
+    }
 
     private data class PendingCommand(val label: String, val bytes: ByteArray)
 
@@ -66,9 +82,13 @@ class MainActivity : Activity() {
             appendLog("gatt state status=$status newState=${newState.toBluetoothStateName()}")
             if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                 activeGatt = gatt
+                gattConnectInProgress = false
+                updateConnectionStatus("Connected; discovering services")
                 appendLog("gatt connected; discovering services")
                 gatt.discoverServices()
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                gattConnectInProgress = false
+                updateConnectionStatus("Standby; press console BT")
                 appendLog("gatt disconnected")
                 gatt.close()
                 if (activeGatt == gatt) activeGatt = null
@@ -81,6 +101,7 @@ class MainActivity : Activity() {
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             appendLog("gatt services discovered status=$status count=${gatt.services.size}")
+            updateConnectionStatus("Connected; services discovered")
             gatt.services.forEach { service ->
                 appendLog("gatt service ${service.uuid}")
                 service.characteristics.forEach { characteristic ->
@@ -243,6 +264,16 @@ class MainActivity : Activity() {
             text = "GATT Connect"
             setOnClickListener { connectGattToLifespan() }
         }
+        val autoConnectButton = Button(this).apply {
+            text = "Auto Connect: On"
+            setOnClickListener {
+                autoConnectEnabled = !autoConnectEnabled
+                text = if (autoConnectEnabled) "Auto Connect: On" else "Auto Connect: Off"
+                updateConnectionStatus(if (autoConnectEnabled) "Standby; press console BT" else "Auto connect off")
+                appendLog("auto-connect enabled=$autoConnectEnabled")
+                if (autoConnectEnabled) startAutoConnect()
+            }
+        }
         val recordCountButton = Button(this).apply {
             text = "Query Record Count"
             setOnClickListener { sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00)) }
@@ -285,21 +316,25 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val setSpeedButton = Button(this).apply {
-            text = "Set Speed 2.5 TEST"
-            setOnClickListener {
-                confirmCommand(
-                    title = "Set speed to 2.5?",
-                    message = "This sends the experimental speed command D0 02 32 00 00. Use only while supervising the treadmill."
-                ) {
-                    sendLifespanCommand("set speed 2.5 test", byteArrayOf(0xD0.toByte(), 0x02, 0x32, 0x00, 0x00))
-                    sendLifespanCommand("speed property 82", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
-                }
-            }
+        val setSpeed20Button = Button(this).apply {
+            text = "Speed 2.0"
+            setOnClickListener { confirmSetSpeed(200) }
+        }
+        val setSpeed25Button = Button(this).apply {
+            text = "Speed 2.5"
+            setOnClickListener { confirmSetSpeed(250) }
+        }
+        val setSpeed30Button = Button(this).apply {
+            text = "Speed 3.0"
+            setOnClickListener { confirmSetSpeed(300) }
         }
         val sppButton = Button(this).apply {
             text = "SPP Probe"
             setOnClickListener { connectToLifespan() }
+        }
+        statusView = TextView(this).apply {
+            text = "Standby; press console BT"
+            textSize = 16f
         }
         logView = TextView(this).apply {
             textSize = 13f
@@ -309,6 +344,10 @@ class MainActivity : Activity() {
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(connectButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(autoConnectButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -340,7 +379,15 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
-            addView(setSpeedButton, LinearLayout.LayoutParams(
+            addView(setSpeed20Button, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(setSpeed25Button, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(setSpeed30Button, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -364,6 +411,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
+            addView(statusView)
             addView(controls)
             addView(scanControls)
             addView(logScrollView, LinearLayout.LayoutParams(
@@ -402,6 +450,7 @@ class MainActivity : Activity() {
         appendBluetoothState()
         appendBondedDevices()
         probeBondedDevices()
+        startAutoConnect()
     }
 
     private fun confirmCommand(title: String, message: String, onConfirm: () -> Unit) {
@@ -411,6 +460,32 @@ class MainActivity : Activity() {
             .setPositiveButton("Send") { _, _ -> onConfirm() }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun confirmSetSpeed(speedHundredths: Int) {
+        val speed = speedHundredths / 100.0
+        val packet = buildSetSpeedCommand(speedHundredths)
+        confirmCommand(
+            title = "Set speed to ${"%.1f".format(Locale.US, speed)}?",
+            message = "This sends ${packet.toHex()} to the treadmill. Use only while supervising the treadmill."
+        ) {
+            sendSetSpeed(speedHundredths)
+        }
+    }
+
+    private fun sendSetSpeed(speedHundredths: Int) {
+        val speed = speedHundredths / 100.0
+        sendLifespanCommand(
+            "set speed ${"%.2f".format(Locale.US, speed)}",
+            buildSetSpeedCommand(speedHundredths)
+        )
+        sendLifespanCommand("speed property 82", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
+    }
+
+    private fun buildSetSpeedCommand(speedHundredths: Int): ByteArray {
+        val whole = (speedHundredths / 100).coerceIn(0, 12)
+        val fractional = (speedHundredths % 100).coerceIn(0, 99)
+        return byteArrayOf(0xD0.toByte(), whole.toByte(), fractional.toByte(), 0x00, 0x00)
     }
 
     private fun requestNeededPermissions() {
@@ -481,6 +556,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         stopScan()
+        autoConnectEnabled = false
+        mainHandler.removeCallbacks(autoConnectRunnable)
         if (receiverRegistered) {
             unregisterReceiver(classicReceiver)
             receiverRegistered = false
@@ -492,6 +569,22 @@ class MainActivity : Activity() {
         writeInFlight = false
         inFlightCommand = null
         super.onDestroy()
+    }
+
+    private fun startAutoConnect() {
+        mainHandler.removeCallbacks(autoConnectRunnable)
+        if (autoConnectEnabled) {
+            updateConnectionStatus("Standby; press console BT")
+            mainHandler.post(autoConnectRunnable)
+        }
+    }
+
+    private fun updateConnectionStatus(status: String) {
+        runOnUiThread {
+            if (::statusView.isInitialized) {
+                statusView.text = status
+            }
+        }
     }
 
     private fun hasScanPermission(): Boolean {
@@ -649,16 +742,21 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun connectGattToLifespan() {
+    private fun connectGattToLifespan(manual: Boolean = true) {
         if (!hasConnectPermission()) {
-            appendLog("missing Bluetooth connect permission")
+            if (manual) appendLog("missing Bluetooth connect permission")
             requestNeededPermissions()
+            return
+        }
+
+        if (gattConnectInProgress || activeGatt != null) {
+            if (manual) appendLog("GATT is already connecting or connected")
             return
         }
 
         val device = findLifespanDevice()
         if (device == null) {
-            appendLog("no bonded $lifespanDeviceName device found")
+            if (manual) appendLog("no bonded $lifespanDeviceName device found")
             return
         }
 
@@ -668,12 +766,24 @@ class MainActivity : Activity() {
         pendingCommands.clear()
         writeInFlight = false
         inFlightCommand = null
-        appendLog("gatt connect probe started name=${device.name} address=${device.address} type=${device.type}")
-        activeGatt = if (Build.VERSION.SDK_INT >= 23) {
+        gattConnectInProgress = true
+        updateConnectionStatus("Connecting to console")
+        appendLog("${if (manual) "manual" else "auto"} gatt connect started name=${device.name} address=${device.address} type=${device.type}")
+        val gatt = if (Build.VERSION.SDK_INT >= 23) {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } else {
             device.connectGatt(this, false, gattCallback)
         }
+        activeGatt = gatt
+        mainHandler.postDelayed({
+            if (gattConnectInProgress && activeGatt == gatt) {
+                appendLog("gatt connect attempt timed out; returning to standby")
+                updateConnectionStatus("Standby; press console BT")
+                gattConnectInProgress = false
+                activeGatt = null
+                gatt.close()
+            }
+        }, 6_000)
         appendLog("gatt connect requested")
     }
 
