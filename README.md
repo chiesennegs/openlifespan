@@ -22,18 +22,32 @@ The initial target device is the LifeSpan TR-1200 DT3 treadmill console.
 - No bundled trackers, ads, or social SDKs.
 - No redistribution of LifeSpan proprietary assets.
 
+## Current Version
+
+The first app version can:
+
+- Stay in a BLE standby mode so it is ready when the console Bluetooth button is pressed.
+- Sync the current console counters for distance, duration, calories, steps, max speed, and units.
+- Save synced sessions locally on the phone.
+- Show today's totals and a recent-session history.
+- Compute average speed from synced distance and elapsed time.
+- Manually clear stored console activity after confirmation.
+- Manually restore or adjust treadmill speed with confirmation.
+- Reset the BLE session deterministically when Android's GATT stack gets stuck.
+- Keep an app-private debug log for troubleshooting.
+
 ## Project Phases
 
-1. BLE discovery logger
+1. BLE discovery logger - done
    - Scan for nearby Bluetooth LE devices.
    - Identify the treadmill console by name, advertisement data, services, and characteristics.
    - Capture reads, writes, and notifications during treadmill sync.
 
-2. Protocol decoder
+2. Protocol decoder - in progress
    - Map raw packets to workout fields: duration, distance, calories, steps, speed, and timestamps.
    - Build repeatable fixtures from real capture logs.
 
-3. Local activity app
+3. Local activity app - in progress
    - Persist workouts locally.
    - Show daily, weekly, monthly, and yearly summaries.
    - Add trends, streaks, personal bests, and export/import.

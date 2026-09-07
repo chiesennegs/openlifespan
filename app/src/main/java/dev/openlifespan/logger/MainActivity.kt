@@ -3,73 +3,71 @@ package dev.openlifespan.logger
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothSocket
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.ParcelUuid
 import android.os.Looper
-import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
-import java.util.UUID
 
 class MainActivity : Activity() {
     private val lifespanDeviceName = "LifeSpan"
     private val logFileName = "openlifespan-log.txt"
-    private val lifespanServiceUuid: UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
-    private val lifespanNotifyUuid: UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
-    private val lifespanWriteUuid: UUID = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
-    private val clientCharacteristicConfigUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-    private val serialPortProfileUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb")
-    private val rfcommProbeChannels = (1..30).toList()
     private val autoConnectIntervalMillis = 4_000L
+    private val commandTimeoutMillis = 1_500L
+
+    private lateinit var store: SessionStore
     private lateinit var statusView: TextView
+    private lateinit var summaryView: TextView
+    private lateinit var currentView: TextView
+    private lateinit var historyList: LinearLayout
     private lateinit var logView: TextView
-    private var bluetoothAdapter: BluetoothAdapter? = null
-    private var bleScanning = false
-    private var receiverRegistered = false
+
     private var activeGatt: BluetoothGatt? = null
     private var activeWriteCharacteristic: BluetoothGattCharacteristic? = null
-    private val pendingCommands = ArrayDeque<PendingCommand>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val pendingCommands = ArrayDeque<PendingCommand>()
     private var writeInFlight = false
     private var inFlightCommand: PendingCommand? = null
-    private var activeSocket: BluetoothSocket? = null
+    private var commandQueueIdle: (() -> Unit)? = null
     private var autoConnectEnabled = true
     private var gattConnectInProgress = false
     private var activeGattAttemptId = 0
     private var gattCloseInProgress = false
+    private var activeSync: SyncSnapshot? = null
+    private var syncAfterConnect = false
+    private var clearAfterSync = false
+    private var restoreSpeedAfterSync: Int? = null
+
+    private data class PendingCommand(
+        val label: String,
+        val bytes: ByteArray,
+        val property: Int? = null,
+        val onResponse: ((ByteArray?) -> Unit)? = null
+    )
 
     private val autoConnectRunnable = object : Runnable {
         override fun run() {
             if (autoConnectEnabled) {
-                if (activeGatt == null && !gattConnectInProgress) {
-                    appendLog("auto-connect standby: waiting for console BT window")
+                if (activeGatt == null && !gattConnectInProgress && !gattCloseInProgress) {
+                    updateStatus("Standby; press console BT")
                     connectGattToLifespan(manual = false)
                 }
                 mainHandler.postDelayed(this, autoConnectIntervalMillis)
@@ -77,105 +75,80 @@ class MainActivity : Activity() {
         }
     }
 
-    private data class PendingCommand(val label: String, val bytes: ByteArray)
-
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (gatt != activeGatt) {
-                appendLog("ignored stale gatt state status=$status newState=${newState.toBluetoothStateName()}")
+                appendLog("ignored stale gatt state status=$status state=${newState.toBluetoothStateName()}")
                 gatt.closeQuietly()
                 return
             }
 
-            appendLog("gatt state status=$status newState=${newState.toBluetoothStateName()}")
+            appendLog("gatt state status=$status state=${newState.toBluetoothStateName()}")
             if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
-                activeGatt = gatt
                 gattConnectInProgress = false
                 gattCloseInProgress = false
-                updateConnectionStatus("Connected; discovering services")
-                appendLog("gatt connected; discovering services")
+                updateStatus("Connected; discovering services")
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
-                resetGattState("gatt disconnected status=$status state=${newState.toBluetoothStateName()}", closeDelayMillis = 250)
+                resetGattState("disconnected status=$status state=${newState.toBluetoothStateName()}")
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (gatt != activeGatt) {
-                appendLog("ignored stale gatt services discovered status=$status")
+                appendLog("ignored stale service discovery status=$status")
                 return
             }
 
-            appendLog("gatt services discovered status=$status count=${gatt.services.size}")
-            updateConnectionStatus("Connected; services discovered")
-            gatt.services.forEach { service ->
-                appendLog("gatt service ${service.uuid}")
-                service.characteristics.forEach { characteristic ->
-                    appendLog("gatt characteristic ${characteristic.uuid} props=${characteristic.properties.toCharacteristicProperties()}")
-                    characteristic.descriptors.forEach { descriptor ->
-                        appendLog("gatt descriptor ${descriptor.uuid} for ${characteristic.uuid}")
-                    }
-                }
-            }
-
-            val service = gatt.getService(lifespanServiceUuid)
-            if (service == null) {
-                appendLog("LifeSpan service not found: $lifespanServiceUuid")
+            appendLog("services discovered status=$status count=${gatt.services.size}")
+            val service = gatt.getService(LifeSpanProtocol.serviceUuid)
+            val notifyCharacteristic = service?.getCharacteristic(LifeSpanProtocol.notifyUuid)
+            val writeCharacteristic = service?.getCharacteristic(LifeSpanProtocol.writeUuid)
+            if (service == null || notifyCharacteristic == null || writeCharacteristic == null) {
+                updateStatus("LifeSpan service unavailable")
+                resetGattState("missing LifeSpan GATT service", closeDelayMillis = 500)
                 return
             }
 
-            val notifyCharacteristic = service.getCharacteristic(lifespanNotifyUuid)
-            if (notifyCharacteristic == null) {
-                appendLog("LifeSpan notify characteristic not found: $lifespanNotifyUuid")
-                return
-            }
-
+            activeWriteCharacteristic = writeCharacteristic
             val notificationSet = gatt.setCharacteristicNotification(notifyCharacteristic, true)
-            appendLog("LifeSpan notification local set=$notificationSet")
-            val descriptor = notifyCharacteristic.getDescriptor(clientCharacteristicConfigUuid)
+            appendLog("notification local set=$notificationSet")
+            val descriptor = notifyCharacteristic.getDescriptor(LifeSpanProtocol.clientConfigUuid)
             if (descriptor == null) {
-                appendLog("LifeSpan notification descriptor not found: $clientCharacteristicConfigUuid")
+                appendLog("notification descriptor missing")
+                onGattReady()
             } else {
                 descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                val writeStarted = gatt.writeDescriptor(descriptor)
-                appendLog("LifeSpan notification descriptor writeStarted=$writeStarted")
+                val started = gatt.writeDescriptor(descriptor)
+                appendLog("notification descriptor writeStarted=$started")
+                if (!started) onGattReady()
             }
-
-            val readStarted = gatt.readCharacteristic(notifyCharacteristic)
-            appendLog("LifeSpan notify readStarted=$readStarted")
-
-            val writeCharacteristic = service.getCharacteristic(lifespanWriteUuid)
-            activeWriteCharacteristic = writeCharacteristic
-            appendLog("LifeSpan write characteristic present=${writeCharacteristic != null}")
         }
 
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (gatt != activeGatt) {
-                appendLog("ignored stale gatt read ${characteristic.uuid} status=$status")
+                appendLog("ignored stale descriptor write status=$status")
                 return
             }
-            appendLog("gatt read ${characteristic.uuid} status=$status value=${characteristic.value?.toHex().orEmpty()}")
+
+            appendLog("descriptor write ${descriptor.uuid} status=$status")
+            onGattReady()
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (gatt != activeGatt) {
-                appendLog("ignored stale gatt notify ${characteristic.uuid}")
+                appendLog("ignored stale notify ${characteristic.uuid}")
                 return
             }
+
             val value = characteristic.value
-            appendLog("gatt notify ${characteristic.uuid} value=${value?.toHex().orEmpty()}")
-            if (value != null) {
-                appendDecodedLifespanResponse(value)
-            }
-            if (characteristic.uuid == lifespanNotifyUuid) {
-                writeInFlight = false
-                inFlightCommand = null
-                sendNextPendingCommand()
-            }
+            val command = inFlightCommand
+            appendLog("rx ${value?.toHex().orEmpty()} for ${command?.label ?: "unknown"}")
+            command?.onResponse?.invoke(value)
+            writeInFlight = false
+            inFlightCommand = null
+            sendNextPendingCommand()
+            notifyQueueIdleIfReady()
         }
 
         override fun onCharacteristicWrite(
@@ -184,338 +157,158 @@ class MainActivity : Activity() {
             status: Int
         ) {
             if (gatt != activeGatt) {
-                appendLog("ignored stale gatt write ${characteristic.uuid} status=$status")
+                appendLog("ignored stale write status=$status")
                 return
             }
-            appendLog("gatt write ${characteristic.uuid} status=$status")
+
+            appendLog("write ${characteristic.uuid} status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                inFlightCommand?.onResponse?.invoke(null)
                 writeInFlight = false
                 inFlightCommand = null
                 sendNextPendingCommand()
+                notifyQueueIdleIfReady()
             }
-        }
-
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            if (gatt != activeGatt) {
-                appendLog("ignored stale gatt descriptor write ${descriptor.uuid} status=$status")
-                return
-            }
-            appendLog("gatt descriptor write ${descriptor.uuid} status=$status")
-        }
-    }
-
-    private val classicReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                BluetoothDevice.ACTION_FOUND -> {
-                    val device = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-                    val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
-                    if (device != null && hasConnectPermission()) {
-                        appendLog("classic seen name=${device.name ?: "(unnamed)"} address=${device.address} rssi=$rssi")
-                    } else {
-                        appendLog("classic seen device; connect permission unavailable")
-                    }
-                }
-
-                BluetoothAdapter.ACTION_DISCOVERY_STARTED -> appendLog("classic discovery started")
-                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> appendLog("classic discovery finished")
-                BluetoothDevice.ACTION_UUID -> {
-                    val device = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-                    val uuids = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID, ParcelUuid::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
-                            ?.filterIsInstance<ParcelUuid>()
-                            ?.toTypedArray()
-                    }
-                    appendDeviceUuids("sdp", device, uuids)
-                }
-            }
-        }
-    }
-
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device
-            val name = if (hasConnectPermission()) device.name ?: "(unnamed)" else "(name unavailable)"
-            appendLog(
-                "seen name=$name address=${device.address} rssi=${result.rssi} " +
-                    "services=${result.scanRecord?.serviceUuids?.joinToString().orEmpty()}"
-            )
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            appendLog("scan failed code=$errorCode")
-            bleScanning = false
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        store = SessionStore(this)
+        buildUi()
+        requestNeededPermissions()
+        refreshHistory()
+        appendLog("OpenLifeSpan ready")
+        startAutoConnect()
+    }
 
-        bluetoothAdapter = getSystemService(BluetoothManager::class.java)?.adapter
+    override fun onDestroy() {
+        autoConnectEnabled = false
+        mainHandler.removeCallbacks(autoConnectRunnable)
+        resetGattState("activity destroyed", closeDelayMillis = 0, resumeAutoConnect = false)
+        super.onDestroy()
+    }
 
-        val startButton = Button(this).apply {
-            text = "Scan / Probe"
-            setOnClickListener { startScan() }
-        }
-        val stopButton = Button(this).apply {
-            text = "Stop Scan"
-            setOnClickListener { stopScan() }
-        }
-        val clearButton = Button(this).apply {
-            text = "Clear Log"
-            setOnClickListener { clearLog() }
-        }
-        val connectButton = Button(this).apply {
-            text = "GATT Connect"
-            setOnClickListener { connectGattToLifespan() }
-        }
-        val autoConnectButton = Button(this).apply {
-            text = "Auto Connect: On"
-            setOnClickListener {
-                autoConnectEnabled = !autoConnectEnabled
-                text = if (autoConnectEnabled) "Auto Connect: On" else "Auto Connect: Off"
-                updateConnectionStatus(if (autoConnectEnabled) "Standby; press console BT" else "Auto connect off")
-                appendLog("auto-connect enabled=$autoConnectEnabled")
-                if (autoConnectEnabled) startAutoConnect()
-            }
-        }
-        val resetBleButton = Button(this).apply {
-            text = "Reset BLE Session"
-            setOnClickListener { resetBleSession() }
-        }
-        val recordCountButton = Button(this).apply {
-            text = "Query Record Count"
-            setOnClickListener { sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00)) }
-        }
-        val syncHandshakeButton = Button(this).apply {
-            text = "Sync Handshake"
-            setOnClickListener {
-                sendLifespanCommand("stopped state", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
-                sendLifespanCommand("multi-user", byteArrayOf(0xAC.toByte(), 0x00, 0x00, 0x00, 0x00))
-                sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00))
-            }
-        }
-        val recordStreamButton = Button(this).apply {
-            text = "Begin Record Stream"
-            setOnClickListener { sendLifespanCommand("record stream", byteArrayOf(0xAB.toByte(), 0x00, 0x00, 0x00, 0x00)) }
-        }
-        val firstRecordButton = Button(this).apply {
-            text = "Query First Record"
-            setOnClickListener { sendLifespanCommand("record 1", byteArrayOf(0xAB.toByte(), 0x00, 0x00, 0x01, 0x00)) }
-        }
-        val dateTimeButton = Button(this).apply {
-            text = "Query Date/Time"
-            setOnClickListener {
-                sendLifespanCommand("date", byteArrayOf(0xA1.toByte(), 0x8D.toByte(), 0x00, 0x00, 0x00))
-                sendLifespanCommand("time", byteArrayOf(0xA1.toByte(), 0x8E.toByte(), 0x00, 0x00, 0x00))
-            }
-        }
-        val liveSnapshotButton = Button(this).apply {
-            text = "Live Snapshot"
-            setOnClickListener { sendLiveSnapshotCommands() }
-        }
-        val clearStoredDataButton = Button(this).apply {
-            text = "Clear Stored Data"
-            setOnClickListener {
-                confirmCommand(
-                    title = "Clear stored data?",
-                    message = "This sends the legacy clear command AB 01 00 00 00 to the treadmill console."
-                ) {
-                    sendLifespanCommand("clear stored data", byteArrayOf(0xAB.toByte(), 0x01, 0x00, 0x00, 0x00))
-                }
-            }
-        }
-        val setSpeed20Button = Button(this).apply {
-            text = "Speed 2.0"
-            setOnClickListener { confirmSetSpeed(200) }
-        }
-        val setSpeed25Button = Button(this).apply {
-            text = "Speed 2.5"
-            setOnClickListener { confirmSetSpeed(250) }
-        }
-        val setSpeed30Button = Button(this).apply {
-            text = "Speed 3.0"
-            setOnClickListener { confirmSetSpeed(300) }
-        }
-        val sppButton = Button(this).apply {
-            text = "SPP Probe"
-            setOnClickListener { connectToLifespan() }
-        }
+    private fun buildUi() {
         statusView = TextView(this).apply {
             text = "Standby; press console BT"
-            textSize = 16f
+            textSize = 18f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
         }
+        summaryView = TextView(this).apply { textSize = 15f }
+        currentView = TextView(this).apply {
+            text = "No session synced yet."
+            textSize = 15f
+        }
+        historyList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         logView = TextView(this).apply {
-            textSize = 13f
+            textSize = 12f
+            visibility = View.GONE
             setTextIsSelectable(true)
         }
 
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(connectButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(autoConnectButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(resetBleButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(recordCountButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(syncHandshakeButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(recordStreamButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(firstRecordButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(dateTimeButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(liveSnapshotButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(clearStoredDataButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(setSpeed20Button, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(setSpeed25Button, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(setSpeed30Button, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(sppButton, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
+        val syncButton = commandButton("Sync Session") { startSessionSync() }
+        val syncClearRestoreButton = commandButton("Sync, Clear, Restore 2.5") {
+            confirmCommand(
+                title = "Sync and clear?",
+                message = "This saves the console counters, clears stored console data, then restores speed to 2.5 MPH."
+            ) {
+                startSessionSync(clearConsole = true, restoreSpeedHundredths = 250)
+            }
+        }
+        val clearButton = commandButton("Clear Console Data") {
+            confirmCommand(
+                title = "Clear console data?",
+                message = "This sends AB 01 00 00 00 to clear stored activity data from the console."
+            ) {
+                enqueueCommand("clear console data", LifeSpanProtocol.clearStoredData())
+            }
+        }
+        val resetButton = commandButton("Reset BLE Session") { resetBleSession() }
+        val autoButton = commandButton("Auto Connect: On") {
+            autoConnectEnabled = !autoConnectEnabled
+            (it as Button).text = if (autoConnectEnabled) "Auto Connect: On" else "Auto Connect: Off"
+            updateStatus(if (autoConnectEnabled) "Standby; press console BT" else "Auto connect off")
+            appendLog("auto-connect enabled=$autoConnectEnabled")
+            if (autoConnectEnabled) startAutoConnect()
+        }
+        val logButton = commandButton("Show Log") {
+            logView.visibility = if (logView.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            (it as Button).text = if (logView.visibility == View.VISIBLE) "Hide Log" else "Show Log"
         }
 
-        val scanControls = LinearLayout(this).apply {
+        val speedControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(startButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(stopButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(clearButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(commandButton("2.0") { confirmSetSpeed(200) }, rowButtonParams())
+            addView(commandButton("2.5") { confirmSetSpeed(250) }, rowButtonParams())
+            addView(commandButton("3.0") { confirmSetSpeed(300) }, rowButtonParams())
         }
 
-        val logScrollView = ScrollView(this).apply {
-            addView(logView)
-        }
-
-        val root = LinearLayout(this).apply {
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
             addView(statusView)
-            addView(controls)
-            addView(scanControls)
-            addView(logScrollView, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            ))
+            addView(sectionTitle("Today"))
+            addView(summaryView)
+            addView(sectionTitle("Sync"))
+            addView(syncButton)
+            addView(syncClearRestoreButton)
+            addView(clearButton)
+            addView(sectionTitle("Speed"))
+            addView(speedControls)
+            addView(sectionTitle("History"))
+            addView(currentView)
+            addView(historyList)
+            addView(sectionTitle("Connection"))
+            addView(autoButton)
+            addView(resetButton)
+            addView(logButton)
+            addView(logView)
         }
 
+        val scrollView = ScrollView(this).apply { addView(content) }
         if (Build.VERSION.SDK_INT >= 23) {
-            root.setOnApplyWindowInsetsListener { view, insets ->
+            scrollView.setOnApplyWindowInsetsListener { view, insets ->
                 if (Build.VERSION.SDK_INT >= 30) {
                     val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
-                    view.setPadding(
-                        24 + systemBars.left,
-                        24 + systemBars.top,
-                        24 + systemBars.right,
-                        24 + systemBars.bottom
-                    )
+                    view.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
                 } else {
                     @Suppress("DEPRECATION")
                     view.setPadding(
-                        24 + insets.systemWindowInsetLeft,
-                        24 + insets.systemWindowInsetTop,
-                        24 + insets.systemWindowInsetRight,
-                        24 + insets.systemWindowInsetBottom
+                        insets.systemWindowInsetLeft,
+                        insets.systemWindowInsetTop,
+                        insets.systemWindowInsetRight,
+                        insets.systemWindowInsetBottom
                     )
                 }
                 insets
             }
         }
-
-        setContentView(root)
-        requestNeededPermissions()
-        appendLog("OpenLifeSpan Bluetooth logger ready")
-        appendBluetoothState()
-        appendBondedDevices()
-        probeBondedDevices()
-        startAutoConnect()
+        setContentView(scrollView)
     }
 
-    private fun confirmCommand(title: String, message: String, onConfirm: () -> Unit) {
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(message)
-            .setPositiveButton("Send") { _, _ -> onConfirm() }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun confirmSetSpeed(speedHundredths: Int) {
-        val speed = speedHundredths / 100.0
-        val packet = buildSetSpeedCommand(speedHundredths)
-        confirmCommand(
-            title = "Set speed to ${"%.1f".format(Locale.US, speed)}?",
-            message = "This sends ${packet.toHex()} to the treadmill. Use only while supervising the treadmill."
-        ) {
-            sendSetSpeed(speedHundredths)
+    private fun sectionTitle(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 17f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            setPadding(0, 28, 0, 8)
         }
     }
 
-    private fun sendSetSpeed(speedHundredths: Int) {
-        val speed = speedHundredths / 100.0
-        sendLifespanCommand(
-            "set speed ${"%.2f".format(Locale.US, speed)}",
-            buildSetSpeedCommand(speedHundredths)
-        )
-        sendLifespanCommand("speed property 82", byteArrayOf(0xA1.toByte(), 0x82.toByte(), 0x00, 0x00, 0x00))
+    private fun commandButton(text: String, onClick: (View) -> Unit): Button {
+        return Button(this).apply {
+            this.text = text
+            minHeight = 52
+            setAllCaps(false)
+            setOnClickListener(onClick)
+        }
     }
 
-    private fun buildSetSpeedCommand(speedHundredths: Int): ByteArray {
-        val whole = (speedHundredths / 100).coerceIn(0, 12)
-        val fractional = (speedHundredths % 100).coerceIn(0, 99)
-        return byteArrayOf(0xD0.toByte(), whole.toByte(), fractional.toByte(), 0x00, 0x00)
+    private fun rowButtonParams(): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = 8
+        }
     }
 
     private fun requestNeededPermissions() {
@@ -528,88 +321,225 @@ class MainActivity : Activity() {
             }
         }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
 
-        if (permissions.isNotEmpty()) {
-            requestPermissions(permissions.toTypedArray(), 100)
-        }
+        if (permissions.isNotEmpty()) requestPermissions(permissions.toTypedArray(), 100)
     }
 
-    private fun startScan() {
-        appendBluetoothState()
-        appendBondedDevices()
-        probeBondedDevices()
-
-        if (!hasScanPermission()) {
-            appendLog("missing Bluetooth scan permission")
-            requestNeededPermissions()
-            return
-        }
-
-        val adapter = bluetoothAdapter
-        if (adapter == null) {
-            appendLog("Bluetooth adapter unavailable")
-            return
-        }
-
-        if (!adapter.isEnabled) {
-            appendLog("Bluetooth is disabled")
-            return
-        }
-
-        registerClassicReceiver()
-
-        val scanner = bluetoothAdapter?.bluetoothLeScanner
-        if (scanner != null && !bleScanning) {
-            scanner.startScan(scanCallback)
-            bleScanning = true
-            appendLog("BLE scan started")
-        } else if (scanner == null) {
-            appendLog("Bluetooth LE scanner unavailable")
-        }
-
-        if (adapter.isDiscovering) {
-            adapter.cancelDiscovery()
-        }
-        val discoveryStarted = adapter.startDiscovery()
-        appendLog("classic discovery requested started=$discoveryStarted")
-    }
-
-    private fun stopScan() {
-        if (bleScanning && hasScanPermission()) {
-            bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
-        }
-        bleScanning = false
-        if (hasScanPermission() && bluetoothAdapter?.isDiscovering == true) {
-            bluetoothAdapter?.cancelDiscovery()
-        }
-        appendLog("scans stopped")
-    }
-
-    override fun onDestroy() {
-        stopScan()
-        autoConnectEnabled = false
-        mainHandler.removeCallbacks(autoConnectRunnable)
-        if (receiverRegistered) {
-            unregisterReceiver(classicReceiver)
-            receiverRegistered = false
-        }
-        activeSocket?.closeQuietly()
-        resetGattState("activity destroyed", closeDelayMillis = 0, resumeAutoConnect = false)
-        super.onDestroy()
+    private fun hasConnectPermission(): Boolean {
+        return Build.VERSION.SDK_INT < 31 ||
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun startAutoConnect() {
         mainHandler.removeCallbacks(autoConnectRunnable)
-        if (autoConnectEnabled && !gattCloseInProgress) {
-            updateConnectionStatus("Standby; press console BT")
-            mainHandler.post(autoConnectRunnable)
+        if (autoConnectEnabled && !gattCloseInProgress) mainHandler.post(autoConnectRunnable)
+    }
+
+    private fun connectGattToLifespan(manual: Boolean = true) {
+        if (!hasConnectPermission()) {
+            if (manual) appendLog("missing Bluetooth connect permission")
+            requestNeededPermissions()
+            return
+        }
+        if (gattConnectInProgress || activeGatt != null || gattCloseInProgress) return
+
+        val bluetoothAdapter = getSystemService(BluetoothManager::class.java)?.adapter
+        val device = bluetoothAdapter?.bondedDevices.orEmpty()
+            .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
+        if (device == null) {
+            if (manual) appendLog("no paired $lifespanDeviceName device found")
+            updateStatus("Pair LifeSpan in Android Bluetooth settings")
+            return
+        }
+
+        gattConnectInProgress = true
+        val attemptId = activeGattAttemptId + 1
+        activeGattAttemptId = attemptId
+        updateStatus("Connecting to console")
+        appendLog("${if (manual) "manual" else "auto"} connect attempt=$attemptId ${device.address}")
+        val gatt = if (Build.VERSION.SDK_INT >= 23) {
+            device.connectGatt(this, false, gattCallback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+        } else {
+            device.connectGatt(this, false, gattCallback)
+        }
+        activeGatt = gatt
+        mainHandler.postDelayed({
+            if (gattConnectInProgress && activeGatt == gatt && activeGattAttemptId == attemptId) {
+                resetGattState("connect attempt=$attemptId timed out", closeDelayMillis = 500)
+            }
+        }, 6_000)
+    }
+
+    private fun onGattReady() {
+        updateStatus("Connected; ready to sync")
+        appendLog("GATT ready")
+        if (syncAfterConnect) {
+            syncAfterConnect = false
+            startSessionSync(clearAfterSync, restoreSpeedAfterSync)
+        }
+    }
+
+    private fun startSessionSync(clearConsole: Boolean = false, restoreSpeedHundredths: Int? = null) {
+        clearAfterSync = clearConsole
+        restoreSpeedAfterSync = restoreSpeedHundredths
+        if (activeWriteCharacteristic == null || activeGatt == null) {
+            syncAfterConnect = true
+            updateStatus("Sync armed; press console BT")
+            appendLog("sync armed while disconnected")
+            return
+        }
+
+        val snapshot = SyncSnapshot()
+        activeSync = snapshot
+        updateStatus("Syncing session")
+        currentView.text = "Reading console counters..."
+        commandQueueIdle = { finishSessionSync(snapshot, clearConsole, restoreSpeedHundredths) }
+
+        enqueueProperty("units", LifeSpanProtocol.PROPERTY_UNITS, snapshot)
+        enqueueProperty("distance", LifeSpanProtocol.PROPERTY_DISTANCE, snapshot)
+        enqueueProperty("calories", LifeSpanProtocol.PROPERTY_CALORIES, snapshot)
+        enqueueProperty("steps", LifeSpanProtocol.PROPERTY_STEPS, snapshot)
+        enqueueProperty("elapsed time", LifeSpanProtocol.PROPERTY_ELAPSED_TIME, snapshot)
+        enqueueProperty("max speed", LifeSpanProtocol.PROPERTY_MAX_SPEED, snapshot)
+        enqueueProperty("device state", LifeSpanProtocol.PROPERTY_DEVICE_STATE, snapshot)
+        enqueueProperty("workout status", LifeSpanProtocol.PROPERTY_WORKOUT_STATUS, snapshot)
+    }
+
+    private fun enqueueProperty(label: String, property: Int, snapshot: SyncSnapshot) {
+        enqueueCommand(label, LifeSpanProtocol.requestProperty(property), property) { value ->
+            val decoded = value?.let { LifeSpanProtocol.parsePropertyResponse(property, it) }
+            when (decoded) {
+                is PropertyValue.Units -> snapshot.units = decoded.value
+                is PropertyValue.Distance -> snapshot.distance = decoded.value
+                is PropertyValue.Calories -> snapshot.calories = decoded.value
+                is PropertyValue.Steps -> snapshot.steps = decoded.value
+                is PropertyValue.ElapsedTime -> snapshot.durationSeconds = decoded.seconds
+                is PropertyValue.MaxSpeed -> snapshot.maxSpeed = decoded.value
+                is PropertyValue.DeviceState -> snapshot.deviceState = decoded.value
+                is PropertyValue.WorkoutStatus -> snapshot.workoutStatus = decoded.value
+                else -> appendLog("could not decode $label")
+            }
+            updateCurrentSnapshot(snapshot)
+        }
+    }
+
+    private fun finishSessionSync(
+        snapshot: SyncSnapshot,
+        clearConsole: Boolean,
+        restoreSpeedHundredths: Int?
+    ) {
+        commandQueueIdle = null
+        activeSync = null
+        val session = snapshot.toSessionOrNull()
+        if (session == null) {
+            updateStatus("Sync incomplete")
+            currentView.text = "Sync incomplete. Press console BT and try again."
+            appendLog("sync incomplete snapshot=$snapshot")
+            return
+        }
+
+        store.add(session)
+        updateStatus("Session saved")
+        currentView.text = formatSession(session)
+        appendLog("session saved id=${session.id}")
+        refreshHistory()
+
+        if (clearConsole) enqueueCommand("clear console data", LifeSpanProtocol.clearStoredData())
+        if (restoreSpeedHundredths != null) {
+            enqueueCommand("restore speed", LifeSpanProtocol.setSpeed(restoreSpeedHundredths))
+        }
+    }
+
+    private fun enqueueCommand(
+        label: String,
+        bytes: ByteArray,
+        property: Int? = null,
+        onResponse: ((ByteArray?) -> Unit)? = null
+    ) {
+        if (!hasConnectPermission()) {
+            requestNeededPermissions()
+            return
+        }
+        if (activeGatt == null || activeWriteCharacteristic == null) {
+            updateStatus("Disconnected; press console BT")
+            appendLog("cannot send $label while disconnected")
+            return
+        }
+
+        pendingCommands.add(PendingCommand(label, bytes, property, onResponse))
+        appendLog("queued $label tx=${bytes.toHex()}")
+        sendNextPendingCommand()
+    }
+
+    private fun sendNextPendingCommand() {
+        if (writeInFlight || pendingCommands.isEmpty()) return
+
+        val gatt = activeGatt
+        val characteristic = activeWriteCharacteristic
+        if (gatt == null || characteristic == null) {
+            notifyQueueIdleIfReady()
+            return
+        }
+
+        val command = pendingCommands.remove()
+        val started = if (Build.VERSION.SDK_INT >= 33) {
+            gatt.writeCharacteristic(
+                characteristic,
+                command.bytes,
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            ) == BluetoothGatt.GATT_SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = command.bytes
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+        appendLog("tx ${command.label} ${command.bytes.toHex()} started=$started")
+        if (!started) {
+            command.onResponse?.invoke(null)
+            sendNextPendingCommand()
+            notifyQueueIdleIfReady()
+            return
+        }
+
+        writeInFlight = true
+        inFlightCommand = command
+        mainHandler.postDelayed({
+            if (writeInFlight && inFlightCommand === command) {
+                appendLog("timeout waiting for ${command.label}")
+                command.onResponse?.invoke(null)
+                writeInFlight = false
+                inFlightCommand = null
+                sendNextPendingCommand()
+                notifyQueueIdleIfReady()
+            }
+        }, commandTimeoutMillis)
+    }
+
+    private fun notifyQueueIdleIfReady() {
+        if (!writeInFlight && pendingCommands.isEmpty()) {
+            commandQueueIdle?.let { mainHandler.post(it) }
+        }
+    }
+
+    private fun confirmSetSpeed(speedHundredths: Int) {
+        val speed = speedHundredths / 100.0
+        val packet = LifeSpanProtocol.setSpeed(speedHundredths)
+        confirmCommand(
+            title = "Set speed to ${"%.1f".format(Locale.US, speed)}?",
+            message = "This sends ${packet.toHex()} to the treadmill. Use only while supervising the treadmill."
+        ) {
+            enqueueCommand("set speed ${"%.2f".format(Locale.US, speed)}", packet)
+            enqueueCommand("read speed", LifeSpanProtocol.requestProperty(LifeSpanProtocol.PROPERTY_SPEED)) { value ->
+                val decoded = value?.let {
+                    LifeSpanProtocol.parsePropertyResponse(LifeSpanProtocol.PROPERTY_SPEED, it)
+                } as? PropertyValue.Speed
+                appendLog("speed now ${decoded?.value ?: "unknown"}")
+            }
         }
     }
 
     private fun resetBleSession() {
-        stopScan()
-        activeSocket?.closeQuietly()
-        activeSocket = null
-        appendLog("manual BLE session reset requested")
+        appendLog("manual BLE reset")
         resetGattState("manual reset", closeDelayMillis = 500)
     }
 
@@ -626,9 +556,11 @@ class MainActivity : Activity() {
         pendingCommands.clear()
         writeInFlight = false
         inFlightCommand = null
+        commandQueueIdle = null
+        activeSync = null
         gattCloseInProgress = gatt != null
-        updateConnectionStatus("Resetting BLE session")
-        appendLog("reset gatt state: $reason")
+        updateStatus("Resetting BLE session")
+        appendLog("reset GATT: $reason")
 
         if (gatt == null) {
             gattCloseInProgress = false
@@ -640,458 +572,78 @@ class MainActivity : Activity() {
         mainHandler.postDelayed({
             gatt.closeQuietly()
             gattCloseInProgress = false
-            updateConnectionStatus("Standby; press console BT")
+            updateStatus("Standby; press console BT")
             if (resumeAutoConnect) startAutoConnect()
         }, closeDelayMillis)
     }
 
-    private fun updateConnectionStatus(status: String) {
+    private fun updateCurrentSnapshot(snapshot: SyncSnapshot) {
+        currentView.text = listOf(
+            "Distance: ${snapshot.distance?.let { "%.2f".format(Locale.US, it) } ?: "--"}",
+            "Time: ${snapshot.durationSeconds?.let { LifeSpanProtocol.formatDuration(it) } ?: "--"}",
+            "Steps: ${snapshot.steps ?: "--"}",
+            "Calories: ${snapshot.calories ?: "--"}",
+            "Max speed: ${snapshot.maxSpeed?.let { LifeSpanProtocol.formatSpeed(it) } ?: "--"}"
+        ).joinToString("\n")
+    }
+
+    private fun refreshHistory() {
+        val sessions = store.load()
+        val todayKey = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val dayFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val todaySessions = sessions.filter { dayFormatter.format(Date(it.capturedAtMillis)) == todayKey }
+        val distance = todaySessions.sumOf { it.distance }
+        val duration = todaySessions.sumOf { it.durationSeconds }
+        val calories = todaySessions.sumOf { it.calories }
+        val steps = todaySessions.sumOf { it.steps }
+        summaryView.text = "${"%.2f".format(Locale.US, distance)} mi  |  " +
+            "${LifeSpanProtocol.formatDuration(duration)}  |  $steps steps  |  $calories cal"
+
+        historyList.removeAllViews()
+        sessions.take(20).forEach { session ->
+            historyList.addView(TextView(this).apply {
+                text = formatSession(session)
+                textSize = 14f
+                setPadding(0, 10, 0, 10)
+            })
+        }
+    }
+
+    private fun formatSession(session: WorkoutSession): String {
+        val maxSpeed = session.maxSpeed?.let { " max ${LifeSpanProtocol.formatSpeed(it)}" } ?: ""
+        return "${session.displayTitle()}\n" +
+            "${"%.2f".format(Locale.US, session.distance)} mi, " +
+            "${LifeSpanProtocol.formatDuration(session.durationSeconds)}, " +
+            "${session.steps} steps, ${session.calories} cal\n" +
+            "avg ${LifeSpanProtocol.formatSpeed(session.averageSpeed)} mph$maxSpeed"
+    }
+
+    private fun confirmCommand(title: String, message: String, onConfirm: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("Send") { _, _ -> onConfirm() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateStatus(status: String) {
         runOnUiThread {
-            if (::statusView.isInitialized) {
-                statusView.text = status
-            }
+            if (::statusView.isInitialized) statusView.text = status
         }
-    }
-
-    private fun hasScanPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= 31) {
-            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-        } else {
-            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    private fun hasConnectPermission(): Boolean {
-        return Build.VERSION.SDK_INT < 31 ||
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun registerClassicReceiver() {
-        if (receiverRegistered) return
-
-        val filter = IntentFilter().apply {
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
-            addAction(BluetoothDevice.ACTION_FOUND)
-            addAction(BluetoothDevice.ACTION_UUID)
-        }
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(classicReceiver, filter, RECEIVER_EXPORTED)
-        } else {
-            registerReceiver(classicReceiver, filter)
-        }
-        receiverRegistered = true
-    }
-
-    private fun appendBluetoothState() {
-        val adapter = bluetoothAdapter
-        if (adapter == null) {
-            appendLog("Bluetooth state: no adapter")
-            return
-        }
-
-        val permission = "scanPermission=${hasScanPermission()} connectPermission=${hasConnectPermission()}"
-        appendLog("Bluetooth state: enabled=${adapter.isEnabled} $permission")
-    }
-
-    private fun appendBondedDevices() {
-        if (!hasConnectPermission()) {
-            appendLog("bonded devices unavailable until connect permission is granted")
-            return
-        }
-
-        val bondedDevices = bluetoothAdapter?.bondedDevices.orEmpty()
-        if (bondedDevices.isEmpty()) {
-            appendLog("no bonded Classic Bluetooth devices")
-        } else {
-            bondedDevices.forEach { device ->
-                appendLog("bonded name=${device.name ?: "(unnamed)"} address=${device.address} type=${device.type} bondState=${device.bondState}")
-                appendDeviceUuids("cached", device, device.uuids)
-            }
-        }
-    }
-
-    private fun probeBondedDevices() {
-        if (!hasConnectPermission()) return
-
-        registerClassicReceiver()
-        bluetoothAdapter?.bondedDevices.orEmpty().forEach { device ->
-            val started = device.fetchUuidsWithSdp()
-            appendLog("sdp requested name=${device.name ?: "(unnamed)"} address=${device.address} started=$started")
-        }
-    }
-
-    private fun appendDeviceUuids(prefix: String, device: BluetoothDevice?, uuids: Array<out ParcelUuid>?) {
-        if (device == null) {
-            appendLog("$prefix UUID result without device")
-            return
-        }
-
-        val name = if (hasConnectPermission()) device.name ?: "(unnamed)" else "(name unavailable)"
-        val values = uuids?.joinToString { it.uuid.toString() } ?: "(none)"
-        appendLog("$prefix UUIDs name=$name address=${device.address} uuids=$values")
-    }
-
-    private fun connectToLifespan() {
-        if (!hasConnectPermission()) {
-            appendLog("missing Bluetooth connect permission")
-            requestNeededPermissions()
-            return
-        }
-
-        val device = bluetoothAdapter?.bondedDevices.orEmpty()
-            .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
-        if (device == null) {
-            appendLog("no bonded $lifespanDeviceName device found")
-            return
-        }
-
-        Thread {
-            appendLog("connect probe started name=${device.name} address=${device.address}")
-            bluetoothAdapter?.cancelDiscovery()
-            activeSocket?.closeQuietly()
-
-            val attempts = listOf(
-                "secure SPP" to { device.createRfcommSocketToServiceRecord(serialPortProfileUuid) },
-                "insecure SPP" to { device.createInsecureRfcommSocketToServiceRecord(serialPortProfileUuid) }
-            )
-
-            for ((label, factory) in attempts) {
-                val socket = try {
-                    factory()
-                } catch (exception: IOException) {
-                    appendLog("$label socket creation failed: ${exception.message}")
-                    continue
-                }
-
-                try {
-                    appendLog("$label connecting")
-                    socket.connect()
-                    activeSocket = socket
-                    appendLog("$label connected; listening for 20 seconds")
-                    listenForBytes(socket, label)
-                    appendLog("$label listen complete")
-                    return@Thread
-                } catch (exception: IOException) {
-                    appendLog("$label failed: ${exception.message}")
-                    socket.closeQuietly()
-                }
-            }
-
-            appendLog("SPP UUID attempts failed; probing RFCOMM channels")
-            for (channel in rfcommProbeChannels) {
-                val socket = try {
-                    device.createRfcommSocketOnChannel(channel)
-                } catch (exception: ReflectiveOperationException) {
-                    appendLog("channel $channel socket creation failed: ${exception.message}")
-                    break
-                } catch (exception: ClassCastException) {
-                    appendLog("channel $channel socket creation returned unexpected type: ${exception.message}")
-                    break
-                }
-
-                try {
-                    appendLog("channel $channel connecting")
-                    socket.connect()
-                    activeSocket = socket
-                    appendLog("channel $channel connected; listening for 20 seconds")
-                    listenForBytes(socket, "channel $channel")
-                    appendLog("channel $channel listen complete")
-                    return@Thread
-                } catch (exception: IOException) {
-                    appendLog("channel $channel failed: ${exception.message}")
-                    socket.closeQuietly()
-                }
-            }
-
-            appendLog("connect probe finished without a usable SPP connection")
-        }.start()
-    }
-
-    private fun connectGattToLifespan(manual: Boolean = true) {
-        if (!hasConnectPermission()) {
-            if (manual) appendLog("missing Bluetooth connect permission")
-            requestNeededPermissions()
-            return
-        }
-
-        if (gattConnectInProgress || activeGatt != null || gattCloseInProgress) {
-            if (manual) appendLog("GATT is already connecting or connected")
-            return
-        }
-
-        val device = findLifespanDevice()
-        if (device == null) {
-            if (manual) appendLog("no bonded $lifespanDeviceName device found")
-            return
-        }
-
-        bluetoothAdapter?.cancelDiscovery()
-        activeGatt?.close()
-        activeWriteCharacteristic = null
-        pendingCommands.clear()
-        writeInFlight = false
-        inFlightCommand = null
-        gattConnectInProgress = true
-        val attemptId = activeGattAttemptId + 1
-        activeGattAttemptId = attemptId
-        updateConnectionStatus("Connecting to console")
-        appendLog("${if (manual) "manual" else "auto"} gatt connect attempt=$attemptId started name=${device.name} address=${device.address} type=${device.type}")
-        val gatt = if (Build.VERSION.SDK_INT >= 23) {
-            device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        } else {
-            device.connectGatt(this, false, gattCallback)
-        }
-        activeGatt = gatt
-        mainHandler.postDelayed({
-            if (gattConnectInProgress && activeGatt == gatt && activeGattAttemptId == attemptId) {
-                resetGattState("gatt connect attempt=$attemptId timed out", closeDelayMillis = 500)
-            }
-        }, 6_000)
-        appendLog("gatt connect requested")
-    }
-
-    private fun findLifespanDevice(): BluetoothDevice? {
-        if (!hasConnectPermission()) return null
-        return bluetoothAdapter?.bondedDevices.orEmpty()
-            .firstOrNull { it.name.equals(lifespanDeviceName, ignoreCase = true) }
-    }
-
-    private fun sendLifespanCommand(label: String, command: ByteArray) {
-        if (!hasConnectPermission()) {
-            appendLog("missing Bluetooth connect permission")
-            requestNeededPermissions()
-            return
-        }
-
-        val gatt = activeGatt
-        val characteristic = activeWriteCharacteristic
-        if (gatt == null || characteristic == null) {
-            appendLog("cannot send $label; connect GATT first and wait for service discovery")
-            return
-        }
-
-        pendingCommands.add(PendingCommand(label, command))
-        appendLog("queued command $label tx=${command.toHex()} queueSize=${pendingCommands.size}")
-        sendNextPendingCommand()
-    }
-
-    private fun sendLiveSnapshotCommands() {
-        val propertyQueries = listOf(
-            0x81 to "units",
-            0x82 to "speed",
-            0x83 to "incline",
-            0x84 to "resistance",
-            0x85 to "distance",
-            0x87 to "calories",
-            0x88 to "steps",
-            0x89 to "elapsed time",
-            0x8A to "pace-or-rpm",
-            0x91 to "device state",
-            0x94 to "workout status",
-            0x71 to "max speed",
-            0x73 to "max resistance"
-        )
-
-        propertyQueries.forEach { (property, label) ->
-            sendLifespanCommand(
-                "$label property ${property.toHexByte()}",
-                byteArrayOf(0xA1.toByte(), property.toByte(), 0x00, 0x00, 0x00)
-            )
-        }
-    }
-
-    private fun sendNextPendingCommand() {
-        if (writeInFlight || pendingCommands.isEmpty()) return
-
-        val gatt = activeGatt
-        val characteristic = activeWriteCharacteristic
-        if (gatt == null || characteristic == null) {
-            appendLog("cannot send queued command; GATT is not ready")
-            return
-        }
-
-        val command = pendingCommands.peek() ?: return
-        val started = if (Build.VERSION.SDK_INT >= 33) {
-            gatt.writeCharacteristic(characteristic, command.bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == 0
-        } else {
-            @Suppress("DEPRECATION")
-            characteristic.value = command.bytes
-            @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(characteristic)
-        }
-        appendLog("command ${command.label} tx=${command.bytes.toHex()} started=$started")
-
-        if (started) {
-            writeInFlight = true
-            inFlightCommand = command
-            pendingCommands.remove()
-            mainHandler.postDelayed({
-                if (writeInFlight && inFlightCommand === command) {
-                    appendLog("command ${command.label} timed out waiting for notify; continuing")
-                    writeInFlight = false
-                    inFlightCommand = null
-                    sendNextPendingCommand()
-                }
-            }, 1_500)
-        } else {
-            pendingCommands.remove()
-            appendLog("dropped command ${command.label}; GATT write did not start")
-        }
-    }
-
-    private fun appendDecodedLifespanResponse(value: ByteArray) {
-        if (value.size < 2) return
-
-        when (value[0].toUnsignedInt()) {
-            0xAA -> appendRecordCountResponse(value)
-            0xAB -> appendRecordDataResponse(value)
-            0xAC -> appendStatusResponse("multi-user", value)
-            0xA1 -> appendStatusResponse("property", value)
-        }
-    }
-
-    private fun appendRecordCountResponse(value: ByteArray) {
-        when (value.getOrNull(1)?.toUnsignedInt()) {
-            0xAA -> {
-                if (value.size >= 4) {
-                    val count = (value[2].toUnsignedInt() shl 8) or value[3].toUnsignedInt()
-                    appendLog("decoded record count=$count")
-                } else {
-                    appendLog("decoded record count response too short")
-                }
-            }
-            0xFF -> appendLog("decoded record count status=FF (not a valid count)")
-            else -> appendLog("decoded record count unexpected status=${value[1].toHexByte()}")
-        }
-    }
-
-    private fun appendRecordDataResponse(value: ByteArray) {
-        if (value.getOrNull(1)?.toUnsignedInt() == 0xAA) {
-            appendLog("decoded record data frame marker")
-        } else {
-            appendLog("decoded record data status=${value.getOrNull(1)?.toHexByte() ?: "missing"}")
-        }
-    }
-
-    private fun appendStatusResponse(label: String, value: ByteArray) {
-        val activeLabel = inFlightCommand?.label
-        val responseLabel = if (label == "property" && activeLabel != null) "$label for $activeLabel" else label
-        val status = value.getOrNull(1)?.toUnsignedInt()
-        when (status) {
-            0xAA -> appendLog("decoded $responseLabel status=AA payload=${value.drop(2).toByteArray().toHex()} ${decodePropertyPayload(activeLabel, value)}")
-            0xFF -> appendLog("decoded $responseLabel status=FF")
-            null -> appendLog("decoded $responseLabel response too short")
-            else -> appendLog("decoded $responseLabel status=${value[1].toHexByte()} payload=${value.drop(2).toByteArray().toHex()} ${decodePropertyPayload(activeLabel, value)}")
-        }
-    }
-
-    private fun decodePropertyPayload(commandLabel: String?, value: ByteArray): String {
-        if (commandLabel == null || value.size < 6 || value[0].toUnsignedInt() != 0xA1) return ""
-
-        val payload = value.drop(2).toByteArray()
-        val first = payload[0].toUnsignedInt()
-        val second = payload[1].toUnsignedInt()
-        val third = payload[2].toUnsignedInt()
-        val twoByteValue = (first shl 8) or second
-        val decimalValue = (first * 100 + second) / 100.0
-        val hmsSeconds = first * 3600 + second * 60 + third
-
-        return when {
-            commandLabel.startsWith("speed ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
-            commandLabel.startsWith("max speed ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
-            commandLabel.startsWith("distance ") -> "decodedValue=${"%.2f".format(Locale.US, decimalValue)}"
-            commandLabel.startsWith("incline ") -> "decodedValue=${decodeIncline(first)}"
-            commandLabel.startsWith("elapsed time ") -> "decodedValue=${formatSeconds(hmsSeconds)}"
-            commandLabel.startsWith("pace-or-rpm ") -> "decodedInt=$twoByteValue decodedTime=${formatSeconds(hmsSeconds)}"
-            commandLabel.startsWith("units ") -> "decodedByte=$first"
-            commandLabel.startsWith("device state ") -> "decodedByte=$first"
-            commandLabel.startsWith("workout status ") -> "decodedByte=$first"
-            else -> "decodedInt=$twoByteValue"
-        }
-    }
-
-    private fun decodeIncline(value: Int): Int {
-        val magnitude = value and 0x7F
-        return if (magnitude <= 50) value else 50 - value
-    }
-
-    private fun formatSeconds(seconds: Int): String {
-        val hours = seconds / 3600
-        val minutes = (seconds % 3600) / 60
-        val remainingSeconds = seconds % 60
-        return "%02d:%02d:%02d".format(Locale.US, hours, minutes, remainingSeconds)
-    }
-
-    private fun BluetoothDevice.createRfcommSocketOnChannel(channel: Int): BluetoothSocket {
-        val method = javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-        return method.invoke(this, channel) as BluetoothSocket
-    }
-
-    private fun listenForBytes(socket: BluetoothSocket, label: String) {
-        val input = try {
-            socket.inputStream
-        } catch (exception: IOException) {
-            appendLog("$label input stream failed: ${exception.message}")
-            return
-        }
-
-        val deadline = System.currentTimeMillis() + 20_000
-        val buffer = ByteArray(256)
-        var totalBytes = 0
-
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                val available = input.available()
-                if (available > 0) {
-                    val count = input.read(buffer, 0, minOf(buffer.size, available))
-                    if (count > 0) {
-                        totalBytes += count
-                        appendLog("$label rx ${buffer.toHex(count)}")
-                    }
-                } else {
-                    Thread.sleep(100)
-                }
-            } catch (exception: IOException) {
-                appendLog("$label read failed: ${exception.message}")
-                break
-            } catch (exception: InterruptedException) {
-                Thread.currentThread().interrupt()
-                appendLog("$label interrupted")
-                break
-            }
-        }
-
-        appendLog("$label received totalBytes=$totalBytes")
-        socket.closeQuietly()
     }
 
     private fun appendLog(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
         val line = "[$timestamp] $message"
         runOnUiThread {
-            logView.append("$line\n")
+            if (::logView.isInitialized) logView.append("$line\n")
         }
-        Log.d("OpenLifeSpanLogger", line)
         try {
             openFileOutput(logFileName, MODE_APPEND).use { output ->
                 output.write("$line\n".toByteArray(Charsets.UTF_8))
             }
-        } catch (exception: IOException) {
-            Log.e("OpenLifeSpanLogger", "Failed to write app log", exception)
-        }
-    }
-
-    private fun clearLog() {
-        logView.text = ""
-        deleteFile(logFileName)
-        appendLog("log cleared")
-    }
-
-    private fun BluetoothSocket.closeQuietly() {
-        try {
-            close()
-        } catch (_: IOException) {
+        } catch (_: RuntimeException) {
         }
     }
 
@@ -1111,16 +663,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun ByteArray.toHex(length: Int = size): String {
-        return take(length).joinToString(" ") { byte -> "%02X".format(byte) }
-    }
-
-    private fun Byte.toHexByte(): String = "%02X".format(toUnsignedInt())
-
-    private fun Byte.toUnsignedInt(): Int = toInt() and 0xFF
-
-    private fun Int.toHexByte(): String = "%02X".format(this and 0xFF)
-
     private fun Int.toBluetoothStateName(): String {
         return when (this) {
             BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
@@ -1129,19 +671,5 @@ class MainActivity : Activity() {
             BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
             else -> "UNKNOWN($this)"
         }
-    }
-
-    private fun Int.toCharacteristicProperties(): String {
-        val properties = buildList {
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_BROADCAST != 0) add("broadcast")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("read")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) add("writeNoResponse")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("write")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("notify")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("indicate")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE != 0) add("signedWrite")
-            if (this@toCharacteristicProperties and BluetoothGattCharacteristic.PROPERTY_EXTENDED_PROPS != 0) add("extended")
-        }
-        return if (properties.isEmpty()) "none($this)" else properties.joinToString("|")
     }
 }
