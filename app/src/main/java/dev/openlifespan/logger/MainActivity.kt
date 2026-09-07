@@ -62,6 +62,8 @@ class MainActivity : Activity() {
     private var activeSocket: BluetoothSocket? = null
     private var autoConnectEnabled = true
     private var gattConnectInProgress = false
+    private var activeGattAttemptId = 0
+    private var gattCloseInProgress = false
 
     private val autoConnectRunnable = object : Runnable {
         override fun run() {
@@ -79,27 +81,31 @@ class MainActivity : Activity() {
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt state status=$status newState=${newState.toBluetoothStateName()}")
+                gatt.closeQuietly()
+                return
+            }
+
             appendLog("gatt state status=$status newState=${newState.toBluetoothStateName()}")
             if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                 activeGatt = gatt
                 gattConnectInProgress = false
+                gattCloseInProgress = false
                 updateConnectionStatus("Connected; discovering services")
                 appendLog("gatt connected; discovering services")
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
-                gattConnectInProgress = false
-                updateConnectionStatus("Standby; press console BT")
-                appendLog("gatt disconnected")
-                gatt.close()
-                if (activeGatt == gatt) activeGatt = null
-                activeWriteCharacteristic = null
-                pendingCommands.clear()
-                writeInFlight = false
-                inFlightCommand = null
+                resetGattState("gatt disconnected status=$status state=${newState.toBluetoothStateName()}", closeDelayMillis = 250)
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt services discovered status=$status")
+                return
+            }
+
             appendLog("gatt services discovered status=$status count=${gatt.services.size}")
             updateConnectionStatus("Connected; services discovered")
             gatt.services.forEach { service ->
@@ -148,10 +154,18 @@ class MainActivity : Activity() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt read ${characteristic.uuid} status=$status")
+                return
+            }
             appendLog("gatt read ${characteristic.uuid} status=$status value=${characteristic.value?.toHex().orEmpty()}")
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt notify ${characteristic.uuid}")
+                return
+            }
             val value = characteristic.value
             appendLog("gatt notify ${characteristic.uuid} value=${value?.toHex().orEmpty()}")
             if (value != null) {
@@ -169,6 +183,10 @@ class MainActivity : Activity() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt write ${characteristic.uuid} status=$status")
+                return
+            }
             appendLog("gatt write ${characteristic.uuid} status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 writeInFlight = false
@@ -182,6 +200,10 @@ class MainActivity : Activity() {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
+            if (gatt != activeGatt) {
+                appendLog("ignored stale gatt descriptor write ${descriptor.uuid} status=$status")
+                return
+            }
             appendLog("gatt descriptor write ${descriptor.uuid} status=$status")
         }
     }
@@ -274,6 +296,10 @@ class MainActivity : Activity() {
                 if (autoConnectEnabled) startAutoConnect()
             }
         }
+        val resetBleButton = Button(this).apply {
+            text = "Reset BLE Session"
+            setOnClickListener { resetBleSession() }
+        }
         val recordCountButton = Button(this).apply {
             text = "Query Record Count"
             setOnClickListener { sendLifespanCommand("record count", byteArrayOf(0xAA.toByte(), 0x00, 0x00, 0x00, 0x00)) }
@@ -348,6 +374,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(autoConnectButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(resetBleButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -563,20 +593,56 @@ class MainActivity : Activity() {
             receiverRegistered = false
         }
         activeSocket?.closeQuietly()
-        activeGatt?.close()
-        activeWriteCharacteristic = null
-        pendingCommands.clear()
-        writeInFlight = false
-        inFlightCommand = null
+        resetGattState("activity destroyed", closeDelayMillis = 0, resumeAutoConnect = false)
         super.onDestroy()
     }
 
     private fun startAutoConnect() {
         mainHandler.removeCallbacks(autoConnectRunnable)
-        if (autoConnectEnabled) {
+        if (autoConnectEnabled && !gattCloseInProgress) {
             updateConnectionStatus("Standby; press console BT")
             mainHandler.post(autoConnectRunnable)
         }
+    }
+
+    private fun resetBleSession() {
+        stopScan()
+        activeSocket?.closeQuietly()
+        activeSocket = null
+        appendLog("manual BLE session reset requested")
+        resetGattState("manual reset", closeDelayMillis = 500)
+    }
+
+    private fun resetGattState(
+        reason: String,
+        closeDelayMillis: Long = 250,
+        resumeAutoConnect: Boolean = true
+    ) {
+        activeGattAttemptId += 1
+        val gatt = activeGatt
+        gattConnectInProgress = false
+        activeGatt = null
+        activeWriteCharacteristic = null
+        pendingCommands.clear()
+        writeInFlight = false
+        inFlightCommand = null
+        gattCloseInProgress = gatt != null
+        updateConnectionStatus("Resetting BLE session")
+        appendLog("reset gatt state: $reason")
+
+        if (gatt == null) {
+            gattCloseInProgress = false
+            if (resumeAutoConnect) startAutoConnect()
+            return
+        }
+
+        gatt.disconnectQuietly()
+        mainHandler.postDelayed({
+            gatt.closeQuietly()
+            gattCloseInProgress = false
+            updateConnectionStatus("Standby; press console BT")
+            if (resumeAutoConnect) startAutoConnect()
+        }, closeDelayMillis)
     }
 
     private fun updateConnectionStatus(status: String) {
@@ -749,7 +815,7 @@ class MainActivity : Activity() {
             return
         }
 
-        if (gattConnectInProgress || activeGatt != null) {
+        if (gattConnectInProgress || activeGatt != null || gattCloseInProgress) {
             if (manual) appendLog("GATT is already connecting or connected")
             return
         }
@@ -767,8 +833,10 @@ class MainActivity : Activity() {
         writeInFlight = false
         inFlightCommand = null
         gattConnectInProgress = true
+        val attemptId = activeGattAttemptId + 1
+        activeGattAttemptId = attemptId
         updateConnectionStatus("Connecting to console")
-        appendLog("${if (manual) "manual" else "auto"} gatt connect started name=${device.name} address=${device.address} type=${device.type}")
+        appendLog("${if (manual) "manual" else "auto"} gatt connect attempt=$attemptId started name=${device.name} address=${device.address} type=${device.type}")
         val gatt = if (Build.VERSION.SDK_INT >= 23) {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } else {
@@ -776,12 +844,8 @@ class MainActivity : Activity() {
         }
         activeGatt = gatt
         mainHandler.postDelayed({
-            if (gattConnectInProgress && activeGatt == gatt) {
-                appendLog("gatt connect attempt timed out; returning to standby")
-                updateConnectionStatus("Standby; press console BT")
-                gattConnectInProgress = false
-                activeGatt = null
-                gatt.close()
+            if (gattConnectInProgress && activeGatt == gatt && activeGattAttemptId == attemptId) {
+                resetGattState("gatt connect attempt=$attemptId timed out", closeDelayMillis = 500)
             }
         }, 6_000)
         appendLog("gatt connect requested")
@@ -1028,6 +1092,22 @@ class MainActivity : Activity() {
         try {
             close()
         } catch (_: IOException) {
+        }
+    }
+
+    private fun BluetoothGatt.disconnectQuietly() {
+        try {
+            disconnect()
+        } catch (exception: RuntimeException) {
+            appendLog("gatt disconnect failed: ${exception.message}")
+        }
+    }
+
+    private fun BluetoothGatt.closeQuietly() {
+        try {
+            close()
+        } catch (exception: RuntimeException) {
+            appendLog("gatt close failed: ${exception.message}")
         }
     }
 
