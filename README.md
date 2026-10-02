@@ -51,7 +51,7 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. Install it fr
 
 ## Data portability
 
-Use **Data → Export backup** for a full JSON backup and **Data → Restore backup** to atomically replace the local history. Use **Import activity** to merge activity: imported sessions replace local sessions whose activity intervals overlap at millisecond precision; non-overlapping sessions are retained.
+Use **Data → Export backup** for a full JSON backup and **Data → Import backup** to atomically replace the local history. Use **Export activity CSV** and **Import activity CSV** to move activity between compatible exports: imported sessions replace local sessions whose activity intervals overlap at millisecond precision; non-overlapping sessions are retained.
 
 Backups use UTC ISO 8601 timestamps with millisecond precision. Imports are streamed and constrained to 64 MiB and 100,000 sessions, then validated before local data changes.
 

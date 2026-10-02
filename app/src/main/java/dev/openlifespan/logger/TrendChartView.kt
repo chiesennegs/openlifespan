@@ -19,10 +19,13 @@ class TrendChartView(context: Context) : View(context) {
         val maxValue = max(0.1, points.maxOf { it.distance })
         for (i in 0..3) { val y = bottom - (bottom - top) * i / 3f; canvas.drawLine(left, y, right, y, grid) }
         val path = Path(); val area = Path(); val step = if (points.size == 1) 0f else (right - left) / (points.size - 1)
+        val preference = context.getSharedPreferences("settings", 0).getInt("graphLabelSize", 0).coerceIn(0, 2)
+        val preferredLabelSize = 18f + preference * 4f
+        val labelStep = max(1, kotlin.math.ceil(points.size * preferredLabelSize / (right - left)).toInt())
         points.forEachIndexed { index, point ->
             val x = left + index * step; val y = bottom - (point.distance / maxValue * (bottom - top)).toFloat()
             if (index == 0) { path.moveTo(x, y); area.moveTo(x, bottom); area.lineTo(x, y) } else { path.lineTo(x, y); area.lineTo(x, y) }
-            canvas.drawCircle(x, y, 8f, line); canvas.drawText(point.label, x, height - 18f, text)
+            canvas.drawCircle(x, y, 8f, line); if (index % labelStep == 0 || index == points.lastIndex) { text.textSize = preferredLabelSize; canvas.drawText(point.label, x, height - 18f, text) }
         }
         area.lineTo(right, bottom); area.close(); canvas.drawPath(area, fill); canvas.drawPath(path, line)
         text.textAlign = Paint.Align.LEFT; text.textSize = 28f; canvas.drawText(title + " (mi)", left, 24f, text); text.textAlign = Paint.Align.CENTER

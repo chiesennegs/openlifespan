@@ -35,6 +35,30 @@ object SessionTransfer {
         return (listOf(header) + sessions.map { s -> listOf(s.id, iso.format(Instant.ofEpochMilli(s.startedAtMillis)), iso.format(Instant.ofEpochMilli(s.endedAtMillis)), "%.4f".format(Locale.US, s.distance), s.calories, s.steps, s.maxSpeed ?: "", s.units ?: "", "%.4f".format(Locale.US, s.averageSpeed)).joinToString(",") }).joinToString("\n") + "\n"
     }
 
+    /** Reads the exact CSV layout written by [toCsv], then applies the same interval validation as backups. */
+    fun readCsv(input: InputStream): List<WorkoutSession> {
+        val expectedHeader = "id,startedAt,endedAt,distance,calories,steps,maxSpeed,units,averageSpeed"
+        return LimitedInputStream(input, MAX_IMPORT_BYTES).bufferedReader(Charsets.UTF_8).use { reader ->
+            if (reader.readLine() != expectedHeader) throw IOException("CSV header must match an OpenLifeSpan activity export")
+            buildList {
+                var row = 1
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    row++
+                    if (line.isEmpty()) continue
+                    if (size >= MAX_IMPORT_SESSIONS) throw IOException("CSV has more than $MAX_IMPORT_SESSIONS activity rows")
+                    val fields = line.split(',', ignoreCase = false, limit = 9)
+                    if (fields.size != 9) throw IOException("CSV row $row must contain 9 columns")
+                    try {
+                        val max = fields[6].takeIf { it.isNotEmpty() }?.toDoubleOrNull() ?: if (fields[6].isEmpty()) null else throw IllegalArgumentException("maxSpeed is invalid")
+                        val units = fields[7].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: if (fields[7].isEmpty()) null else throw IllegalArgumentException("units is invalid")
+                        add(validatedSession(size + 1, fields[0], fields[1], fields[2], fields[3].toDouble(), fields[4].toInt(), fields[5].toInt(), max, units))
+                    } catch (e: ValidationException) { throw e } catch (e: Exception) { throw IOException("CSV row $row — ${e.message ?: "invalid activity"}") }
+                }
+            }
+        }
+    }
+
     fun read(input: InputStream): List<WorkoutSession> {
         JsonReader(InputStreamReader(LimitedInputStream(input, MAX_IMPORT_BYTES), Charsets.UTF_8)).use { reader ->
             reader.isLenient = false; var format: String? = null; var version: Int? = null; var sessions: List<WorkoutSession>? = null
@@ -71,8 +95,11 @@ object SessionTransfer {
         val seen = mutableSetOf<String>(); r.beginObject(); while (r.hasNext()) { val field = r.nextName(); if (!seen.add(field)) throw ValidationException(record, "duplicate field '$field'")
             when (field) { "id" -> id = r.nextString().takeIf { it.length <= 64 }; "startedAt" -> start = r.nextString(); "endedAt" -> end = r.nextString(); "distance" -> distance = r.nextDouble(); "calories" -> calories = r.nextInt(); "steps" -> steps = r.nextInt(); "maxSpeed" -> max = nullableDouble(r); "units" -> units = nullableInt(r); else -> throw ValidationException(record, "unknown field '$field'") }
         }; r.endObject()
+        return validatedSession(record, id, start, end, distance ?: throw ValidationException(record, "distance is required"), calories ?: throw ValidationException(record, "calories is required"), steps ?: throw ValidationException(record, "steps is required"), max, units)
+    }
+    private fun validatedSession(record: Int, id: String?, start: String?, end: String?, d: Double, c: Int, st: Int, max: Double?, units: Int?): WorkoutSession {
         val validId = try { UUID.fromString(id ?: "").toString() } catch (_: Exception) { throw ValidationException(record, "id must be a UUID") }
-        val started = parseTime(start, record, "startedAt"); val ended = parseTime(end, record, "endedAt"); val d = distance ?: throw ValidationException(record, "distance is required"); val c = calories ?: throw ValidationException(record, "calories is required"); val st = steps ?: throw ValidationException(record, "steps is required")
+        val started = parseTime(start, record, "startedAt"); val ended = parseTime(end, record, "endedAt")
         if (!d.isFinite() || d !in 0.0..1_000.0) throw ValidationException(record, "distance is outside allowed range")
         if (c !in 0..1_000_000 || st !in 0..10_000_000) throw ValidationException(record, "calories or steps is outside allowed range")
         if (ended <= started || ended - started > 86_400_000L) throw ValidationException(record, "invalid activity interval")

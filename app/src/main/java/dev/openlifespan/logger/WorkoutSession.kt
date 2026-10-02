@@ -17,7 +17,7 @@ data class WorkoutSession(
     val units: Int?,
     val averageSpeed: Double,
     val isMock: Boolean = false,
-    /** Exact activity interval. `capturedAtMillis` remains the interval end for dashboard bucketing. */
+    /** Exact activity interval used to distribute synced totals across dashboard time buckets. */
     val startedAtMillis: Long = capturedAtMillis - durationSeconds * 1_000L,
     val endedAtMillis: Long = capturedAtMillis
 ) {
