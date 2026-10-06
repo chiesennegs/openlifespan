@@ -59,6 +59,8 @@ Backups use UTC ISO 8601 timestamps with millisecond precision. Imports are stre
 
 This project intentionally treats legacy-app behavior as compatibility research only. It does not copy decompiled source, proprietary assets, branding, or cloud services. Protocol work is documented through clean-room BLE diagnostics and testing.
 
+Mock-data controls are developer-only. In **System**, tap the OpenLifeSpan mascot seven times rapidly to toggle Developer mode; this reveals or hides **Load Mock Data** and **Unload Mock Data**.
+
 Contributions are welcome. Please keep changes local-first, avoid adding tracking dependencies, and include a clear description and test/build result with pull requests.
 
 ## License and notices
